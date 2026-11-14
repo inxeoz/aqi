@@ -1,0 +1,19 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600;700&display=swap");
+@import "tailwindcss";
+:root { --paper: #F7F6F3; --panel: #FFFFFF; --line: #D9D6CF; --ink: #1A1A1A; --teal: #0B5D66; }
+body { background: var(--paper); color: var(--ink); font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 14px; }
+.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.gov-card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.gov-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.gov-table th { position: sticky; top: 0; background: #fff; border-bottom: 1px solid var(--line); text-align: left; padding: 6px 8px; height: 32px; }
+.gov-table td { border-bottom: 1px solid var(--line); padding: 6px 8px; height: 32px; }
+.gov-table tr.zebra:nth-child(even) td { background: #FAFAF8; }
+.gov-table tr.flash td { background: #FFF3CD; }
+.chip { font-family: "IBM Plex Mono", monospace; font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; background: #fff; cursor: pointer; }
+.chip:hover { border-color: var(--teal); color: var(--teal); }
+.btn { border: 1px solid var(--ink); border-radius: 4px; padding: 6px 12px; font-weight: 600; background: #fff; }
+.btn-primary { background: var(--teal); border-color: var(--teal); color: #fff; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.vuln { border-left: 3px solid var(--teal); padding-left: 12px; }
+.stepdot { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; background: #fff; }
+.stepdot.on { background: var(--teal); color: #fff; border-color: var(--teal); }
