@@ -31,6 +31,12 @@ class Finding(BaseModel):
     cited_row_ids: list[str] = Field(default_factory=list)
 
 
+class Action(BaseModel):
+    text: str
+    rank: int = 2
+    cited_row_ids: list[str] = Field(default_factory=list)
+
+
 class AnalyzeBody(BaseModel):
     rows: list[dict[str, Any]] = Field(default_factory=list)
     role: str = "ward"
@@ -203,15 +209,29 @@ def llm_text(prompt: str, *, kind: str) -> tuple[str, str]:
     return opencode_run(ai_conf()["analyst" if kind == "analyst" else "writer"], prompt), "opencode:" + ai_conf()["analyst" if kind == "analyst" else "writer"]
 
 
-def analyst_call(prompt: str) -> dict:
-    raw, _ = llm_text(prompt + " Reply with JSON only, no code fences.", kind="analyst")
+def analyst_call(prompt: str, role: str = "ward") -> dict:
+    full = (prompt
+            + f" Also propose exactly 5 actions a {role} can take based ONLY on these findings. "
+              "Return them as \"actions\": [{\"text\", \"rank\" (1 critical, 2 important, 3 routine), "
+              "\"cited_row_ids\"}]. Reply with JSON only, no code fences.")
+    raw, _ = llm_text(full, kind="analyst")
     data = json.loads(strip_fences(raw))
     trends = [Finding(**f) for f in data.get("trends", [])]
     hotspots = [Finding(**f) for f in data.get("hotspots", [])]
     gaps = [Finding(**f) for f in data.get("gaps", [])]
     if not (1 <= len(trends) <= 4 and 1 <= len(hotspots) <= 4 and 1 <= len(gaps) <= 4):
         raise ValueError("analyst returned wrong counts")
-    return {"trends": [t.model_dump() for t in trends], "hotspots": [h.model_dump() for h in hotspots], "gaps": [g.model_dump() for g in gaps]}
+    actions = []
+    for a in data.get("actions", [])[:5]:
+        try:
+            act = Action(**a)
+            if act.rank not in (1, 2, 3):
+                act.rank = 2
+            actions.append(act.model_dump())
+        except Exception:
+            continue
+    return {"trends": [t.model_dump() for t in trends], "hotspots": [h.model_dump() for h in hotspots],
+            "gaps": [g.model_dump() for g in gaps], "actions": actions}
 
 
 def writer_call(prompt: str) -> str:
@@ -303,12 +323,17 @@ def analyze(body: AnalyzeBody):
             + json.dumps([{"id": r.get("id"), "flags": r.get("flags")} for r in flagged])
             + ". Return JSON with trends, hotspots, gaps; each item has text and cited_row_ids using ONLY ids from the sample/worst lists. Select 4-6 actions is NOT needed here."
         )
-        a = analyst_call(prompt)
+        a = analyst_call(prompt, role=body.role)
         change = ""
         if body.prev:
             change = writer_call("In 150 words explain these calculated changes for a ward officer: " + json.dumps(body.changes or {}))
         from app.services.ai import model_for as _mf
         _key = (os.getenv("ADAPTION_API_KEY") or os.getenv("ADPAPI"))
+        ai_actions = [
+            {"rank": x["rank"], "text": x["text"], "cited_row_ids": [i for i in x["cited_row_ids"] if i in valid]}
+            for x in a.get("actions", [])]
+        ai_actions = [x for x in ai_actions if x["cited_row_ids"] and x["text"].strip()]
+        use_actions = ai_actions if len(ai_actions) >= 3 else fb_actions
         brief = {
             "trends": clean_findings(a["trends"], valid),
             "hotspots": clean_findings(a["hotspots"], valid),
@@ -321,7 +346,8 @@ def analyze(body: AnalyzeBody):
             brief["hotspots"] = fb["hotspots"]
         if not brief["gaps"]:
             brief["gaps"] = fb["gaps"]
-        return {"brief": brief, "actions": fb_actions, "change": change, "ai": True}
+        return {"brief": brief, "actions": use_actions, "change": change, "ai": True,
+                "actions_source": "ai" if use_actions is ai_actions else "catalog_fallback"}
     except Exception:
         fb["generated_by"] = "fallback_template"
         return {"brief": fb, "actions": fb_actions, "change": "", "ai": False,

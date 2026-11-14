@@ -27,7 +27,8 @@ def test_full_flow():
     assert q["total_records"] == 2 and q["missing_values"] == 1
     assert c.get(f"/api/v1/analyses/{aid}/statistics").json()["mean"] == 100
     recs = c.post(f"/api/v1/analyses/{aid}/recommendations/generate", json={"role": "school"}).json()
-    assert len(recs["recommendations"]) == 5
+    assert len(recs["recommendations"]) == 5  # catalog fallback without key
+    assert recs["source"] == "catalog_fallback"
     rep = c.post(f"/api/v1/analyses/{aid}/reports/generate",
                  json={"kind": "citizen", "lang": "hi", "level": "child"}).json()
     assert rep["version"] == 1

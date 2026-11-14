@@ -30,6 +30,7 @@ export default function Studio() {
   const [notice, setNotice] = useState("");
   const [role, setRole] = useState("ward");
   const [actions, setActions] = useState<Action[]>([]);
+  const [actionsSource, setActionsSource] = useState("");
   const [changeText, setChangeText] = useState("");
   const [changeRows, setChangeRows] = useState<{ loc: string; prev: number | null; cur: number | null }[]>([]);
   const [docType, setDocType] = useState("internal");
@@ -146,14 +147,14 @@ export default function Studio() {
     try { prev = JSON.parse(localStorage.getItem("cas-runs") || "[]").filter((r: SavedRun) => r.scope === scope).slice(-1)[0] || null; } catch {prev = null; }
     try {
       const data = await postAnalyze({ rows: scoped, role, prev: prev ? { mean: prev.mean, top: prev.top } : null });
-      setBrief(data.brief); setActions(data.actions && data.actions.length ? data.actions : actionsFor(role, scoped));
+      setBrief(data.brief); setActions(data.actions && data.actions.length ? data.actions : actionsFor(role, scoped)); setActionsSource(data.ai ? (data.actions_source || "ai") : "template");
       if (data.change) setChangeText(data.change);
       setAiState(data.ai ? "ok" : "down");
       if (data.notice) setNotice(data.notice);
       if (!data.ai && !data.notice) setNotice("The AI service is not available. Showing the standard template instead.");
       go(2);
     } catch {
-      setBrief(heuristicBrief(scoped)); setActions(actionsFor(role, scoped));
+      setBrief(heuristicBrief(scoped)); setActions(actionsFor(role, scoped)); setActionsSource("template");
       setAiState("down"); setNotice("The AI service is not available. Showing the standard template instead.");
       go(2);
     }
@@ -247,7 +248,7 @@ export default function Studio() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="gov-card" style={{ padding: 16 }}>
               <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Upload files</h3>
-              <div role="button" tabIndex={0} aria-label="Upload data files" onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { if (fileRef.current) fileRef.current.click(); } }} onClick={() => { if (fileRef.current) fileRef.current.click(); }} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 24, textAlign: "center", cursor: "pointer" }}>Drop files here, or click to browse<br /><span style={{ fontSize: 12, color: "#666" }}>Any data file: CSV, TSV, TXT, JSON, XLSX, or paste text. Several files allowed.</span></div>
+              <div data-testid="page:button-upload-dropzone" role="button" tabIndex={0} aria-label="Upload data files" onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { if (fileRef.current) fileRef.current.click(); } }} onClick={() => { if (fileRef.current) fileRef.current.click(); }} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 24, textAlign: "center", cursor: "pointer" }}>Drop files here, or click to browse<br /><span style={{ fontSize: 12, color: "#666" }}>Any data file: CSV, TSV, TXT, JSON, XLSX, or paste text. Several files allowed.</span></div>
               <input data-testid="page:input-files" ref={fileRef} type="file" multiple aria-label="Choose data files" style={{ display: "none" }} onChange={e => { if (e.target.files && e.target.files.length) onFiles(e.target.files); e.target.value = ""; }} />
               {upFiles.length > 0 && (<table data-testid="page:table-files" className="gov-table" style={{ marginTop: 12 }}><thead><tr><th>File</th><th></th></tr></thead><tbody>
                 {upFiles.map(f => (<tr key={f.name}><td className="mono">{f.name}</td><td><button data-testid="page:button-remove-file" className="btn" onClick={() => removeFile(f.name)}>Remove</button></td></tr>))}
@@ -308,6 +309,7 @@ export default function Studio() {
               </select>
             </label>
             <span style={{ fontSize: 12, color: "#666" }}>Role</span>
+            {actionsSource && (<span className="chip">actions: {actionsSource === "ai" ? "by AI" : actionsSource === "catalog_fallback" ? "AI unavailable, fixed list" : "template"}</span>)}
             {ROLES.map(r => (<button key={r.id} data-testid="page:button-role" className="btn" style={role === r.id ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}} onClick={() => switchRole(r.id)}>{r.label}</button>))}
           </div>
           {actions.map((a, i) => (<div key={i} className="gov-card" style={{ padding: 10, marginBottom: 6, display: "flex", gap: 10 }}><div style={{ width: 14, borderRadius: 2, background: a.rank === 1 ? "#0B5D66" : a.rank === 2 ? "#EF6C00" : "#999" }} /><div><div>Priority {a.rank}: {a.text}</div><div style={{ marginTop: 6 }}>{cites(a, "a" + i)}</div></div></div>))}

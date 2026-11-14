@@ -128,16 +128,50 @@ def comparison(aid: str, prev: str = ""):
 class RecGen(BaseModel):
     role: str = "ward"
 
+def _catalog_recs(aid: str, role: str, rows) -> list:
+    ev = [x["id"] for x in rows[:2]]
+    out = []
+    for i, text in enumerate(C.for_role(role)[:5]):
+        rid = uuid.uuid4().hex[:8]
+        rank = 1 if i < 2 else 2 if i < 4 else 3
+        S.put("recommendations", {"id": rid, "analysis_id": aid, "role": role, "rank": rank, "text": text, "evidence": json.dumps(ev), "status": "proposed"})
+        out.append({"id": rid, "rank": rank, "text": text, "evidence": ev})
+    return out
+
+
 @r.post("/analyses/{aid}/recommendations/generate")
 def gen_recs(aid: str, body: RecGen):
     rows = S.all_q("SELECT * FROM measurements WHERE dataset_id=?", (aid + "DS",))
-    ev = [x["id"] for x in rows[:2]]
-    out = []
-    for i, t in enumerate(C.for_role(body.role)[:5]):
-        rid = uuid.uuid4().hex[:8]
-        S.put("recommendations", {"id": rid, "analysis_id": aid, "role": body.role, "rank": 1 if i < 2 else 2 if i < 4 else 3, "text": t, "evidence": json.dumps(ev), "status": "proposed"})
-        out.append({"id": rid, "rank": 1 if i < 2 else 2 if i < 4 else 3, "text": t, "evidence": ev})
-    return {"recommendations": out}
+    valid = {x["id"] for x in rows}
+    try:
+        from app.services import ai as ai_gateway
+        import re as _re
+        summ = A.stats([{"value": x["value"], "quality_flags": json.loads(x["quality_flags"] or "[]"),
+                         "location": x["location"], "record_id": x["id"]} for x in rows])
+        prompt = ("Propose exactly 5 actions a " + body.role + " can take based ONLY on this air-quality summary: "
+                  + json.dumps(summ) + ". Reply with JSON only, no code fences: "
+                  '{"actions": [{"text", "rank" (1 critical, 2 important, 3 routine), "cited_row_ids"}]}. '
+                  "Use only these evidence ids: " + json.dumps(sorted(valid)[:20]) + ".")
+        raw = ai_gateway.complete(prompt, kind="analyst").strip()
+        if raw.startswith("```"):
+            raw = raw[raw.find("\n") + 1:raw.rfind("```")].strip()
+        data = json.loads(raw)
+        items = (data.get("actions") or [])[:5] if isinstance(data, dict) else []
+        out = []
+        for a in items:
+            ids = [i for i in (a.get("cited_row_ids") or []) if i in valid]
+            if not ids or not str(a.get("text", "")).strip():
+                continue
+            rid = uuid.uuid4().hex[:8]
+            rank = a.get("rank", 2) if a.get("rank") in (1, 2, 3) else 2
+            S.put("recommendations", {"id": rid, "analysis_id": aid, "role": body.role, "rank": rank,
+                                      "text": str(a["text"]).strip(), "evidence": json.dumps(ids), "status": "proposed"})
+            out.append({"id": rid, "rank": rank, "text": str(a["text"]).strip(), "evidence": ids})
+        if len(out) >= 3:
+            return {"recommendations": out, "source": "ai"}
+    except Exception:
+        pass
+    return {"recommendations": _catalog_recs(aid, body.role, rows), "source": "catalog_fallback"}
 
 @r.get("/analyses/{aid}/recommendations")
 def list_recs(aid: str):
