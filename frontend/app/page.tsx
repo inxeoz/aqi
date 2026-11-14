@@ -65,7 +65,7 @@ export default function Studio() {
   }
   function removeFile(name: string) {
     const rest = rows.filter(r => (r.raw as Record<string, string>).__source !== name);
-    setRows(reid(rest.map(r => r.raw as Record<string, string>)));
+    setRows(reid(buildRows(rest.map(r => r.raw as Record<string, string>))));
     setUpFiles(f => f.filter(x => x.name !== name));
     resetAfter();
   }
@@ -105,7 +105,7 @@ export default function Studio() {
     const list = [...fs];
     const first = rows.length === 0;
     try {
-      const parts = [];
+      const parts: { recs: Record<string, string>[]; note: string }[] = [];
       for (const f of list) parts.push(await parseFile(f));
       const all = parts.flatMap(p => p.recs);
       if (first) ingest(all, parts.map(p => p.note).join(", "));
