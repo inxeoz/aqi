@@ -1,0 +1,41 @@
+location,time,pollutant,value,unit,latitude,longitude
+"DRM Office Danapur, Patna - BSPCB",14-11-2026 01:00:00,SO2,8,ug/m3,25.586562,85.043586
+"Anand Kala Kshetram, Rajamahendravaram - APPCB",14-11-2026 01:00:00,OZONE,42,ug/m3,16.9872867,81.7363176
+"Mayaganj, Bhagalpur - BSPCB",14-11-2026 01:00:00,CO,10,ug/m3,25.265194,87.012947
+"Muzaffarpur Collectorate, Muzaffarpur - BSPCB",14-11-2026 01:00:00,CO,23,ug/m3,26.1209,85.3647
+"Rajiv Gandhi Park, Vijayawada - APPCB",14-11-2026 01:00:00,CO,21,ug/m3,16.509717,80.612222
+"LGBI Airport, Guwahati - PCBA",14-11-2026 01:00:00,PM2.5,96,ug/m3,26.10887,91.589544
+"Forest Office , Kiul - BSPCB",14-11-2026 01:00:00,PM2.5,154,ug/m3,25.149489,86.092345
+"OP Jindal Industrial Park, Tumidih - CECB",14-11-2026 01:00:00,CO,32,ug/m3,22.06631475,83.33820077
+"Lodhi Road, Delhi - IITM",14-11-2026 01:00:00,CO,NA,ug/m3,28.588333,77.221667
+"Rampur, Korba - CECB",14-11-2026 01:00:00,OZONE,7,ug/m3,22.368195,82.746431
+"Sector-25, Chandigarh - CPCC",14-11-2026 01:00:00,CO,45,ug/m3,30.751462,76.762879
+"Najafgarh, Delhi - DPCC",14-11-2026 01:00:00,NO2,48,ug/m3,28.570173,76.933762
+"Okhla Phase-2, Delhi - DPCC",14-11-2026 01:00:00,CO,121,ug/m3,28.530785,77.271255
+"Sector-2 IMT, Manesar - HSPCB",14-11-2026 01:00:00,OZONE,7,ug/m3,28.360699,76.93609
+"Rakhial, Ahmedabad - IITM",14-11-2026 01:00:00,SO2,16,ug/m3,23.016834,72.625775
+"R K Puram, Delhi - DPCC",14-11-2026 01:00:00,CO,139,ug/m3,28.563262,77.186937
+"MD University, Rohtak - HSPCB",14-11-2026 01:00:00,OZONE,17,ug/m3,28.52123,76.37138
+"Jigani, Bengaluru - KSPCB",14-11-2026 01:00:00,PM2.5,NA,ug/m3,12.7816279,77.6299145
+"Patti Mehar, Ambala - HSPCB",14-11-2026 01:00:00,OZONE,37,ug/m3,30.379589,76.778328
+"Sector-51, Gurugram - HSPCB",14-11-2026 01:00:00,PM2.5,230,ug/m3,28.4227,77.0667
+"Corporation Ground, Thrissur - Kerala PCB",14-11-2026 01:00:00,NH3,0,ug/m3,10.5324,76.2159
+"Diwator Nagar, Koppal - KSPCB",14-11-2026 01:00:00,SO2,23,ug/m3,15.34763,76.181767
+"Udyogamandal, Eloor - Kerala PCB",14-11-2026 01:00:00,CO,20,ug/m3,10.073232,76.302765
+"CBD Belapur, Belapur - MPCB",14-11-2026 01:00:00,SO2,14,ug/m3,19.0243902,73.0406721
+"BTM Layout, Bengaluru - CPCB",14-11-2026 01:00:00,NO2,22,ug/m3,12.9135218,77.5950804
+"Deen Dayal Nagar, Gwalior - MPPCB",14-11-2026 01:00:00,SO2,14,ug/m3,26.259242,78.216432
+"Kalu Nagar, Dombivli - MPCB",14-11-2026 01:00:00,SO2,26,ug/m3,19.2268427,73.0788456
+"Diwator Nagar, Koppal - KSPCB",14-11-2026 01:00:00,NH3,3,ug/m3,15.34763,76.181767
+"Khadakpada, Kalyan - MPCB",14-11-2026 01:00:00,OZONE,8,ug/m3,19.25292,73.142019
+"Kherwadi_Bandra East, Mumbai - MPCB",14-11-2026 01:00:00,PM10,112,ug/m3,19.0632143,72.8456324
+"Panchawati_Pashan, Pune - IITM",14-11-2026 01:00:00,PM2.5,134,ug/m3,18.536457,73.805454
+"Gavalinagar, Pimpri Chinchwad - MPCB",14-11-2026 01:00:00,OZONE,18,ug/m3,18.63673,73.82487
+"Bandra Kurla Complex, Mumbai - MPCB",14-11-2026 01:00:00,NO2,88,ug/m3,19.065931,72.862131
+"Navy Nagar-Colaba, Mumbai - IITM",14-11-2026 01:00:00,CO,51,ug/m3,18.897756,72.81332
+"Mahape, Navi Mumbai - MPCB",14-11-2026 01:00:00,OZONE,9,ug/m3,19.1135051,73.008978
+"CDA Area, Cuttack - OSPCB",14-11-2026 01:00:00,CO,58,ug/m3,20.48891,85.84768
+"Meher Colony, Baripada - OSPCB",14-11-2026 01:00:00,NH3,2,ug/m3,21.941841,86.728318
+"New Colony, Bundi - RSPCB",14-11-2026 01:00:00,NO2,103,ug/m3,25.435774,75.644272
+"Lumpyngngad, Shillong - Meghalaya PCB",14-11-2026 01:00:00,CO,15,ug/m3,25.5586,91.8985
+"Talcher Coalfields,Talcher - OSPCB",14-11-2026 01:00:00,CO,26,ug/m3,20.9360711,85.1707021

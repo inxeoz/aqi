@@ -253,6 +253,25 @@ def health():
     return {"ok": True}
 
 
+@app.get("/v1/models")
+def compat_models():
+    """OpenAI-compatible model list for tooling probes. Proxies Adaption when keyed."""
+    try:
+        from app.services.ai import complete  # noqa: F401 (ensures gateway importable)
+        from adaption import Adaption
+        import os as _os
+        key = _os.getenv("ADAPTION_API_KEY") or _os.getenv("ADPAPI")
+        if not key:
+            raise RuntimeError("no key")
+        ms = Adaption(api_key=key).models.list()
+        return {"object": "list", "data": [
+            {"id": x.id, "object": "model", "owned_by": "adaption"} for x in ms.data]}
+    except Exception:
+        from app.services.ai import model_for
+        return {"object": "list", "data": [
+            {"id": model_for("analyst"), "object": "model", "owned_by": "local"}]}
+
+
 class DocBody(BaseModel):
     brief: dict[str, Any] = Field(default_factory=dict)
     actions: list[dict[str, Any]] = Field(default_factory=list)
