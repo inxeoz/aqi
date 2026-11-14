@@ -342,10 +342,14 @@ def analyze(body: AnalyzeBody):
             + json.dumps([{"id": r.get("id"), "flags": r.get("flags")} for r in flagged])
             + ". Return JSON with trends, hotspots, gaps; each item has text and cited_row_ids using ONLY ids from the sample/worst lists. Select 4-6 actions is NOT needed here."
         )
-        a = analyst_call(prompt, role=body.role)
-        change = ""
-        if body.prev:
-            change = writer_call("In 150 words explain these calculated changes for a ward officer: " + json.dumps(body.changes or {}))
+        from concurrent.futures import ThreadPoolExecutor as _Pool
+        with _Pool(max_workers=2) as _pool:
+            _fa = _pool.submit(analyst_call, prompt, body.role)
+            _fw = (_pool.submit(writer_call, "In 120 words explain these calculated changes for a ward officer: "
+                                + json.dumps(body.changes or {})) if body.prev else None)
+            a = _fa.result()
+            change = _fw.result() if _fw else ""
+
         from app.services.ai import model_for as _mf
         _key = (os.getenv("ADAPTION_API_KEY") or os.getenv("ADPAPI"))
         ai_actions = [
