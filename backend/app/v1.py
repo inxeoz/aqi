@@ -1,0 +1,147 @@
+"""Versioned REST API /api/v1 per new-spec section 5."""
+import json, time, uuid
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from .services import pipeline as P, store as S, analytics as A, catalog as C
+
+r = APIRouter(prefix="/api/v1")
+
+class TextIn(BaseModel):
+    text: str = ""
+    filename: str = "pasted.csv"
+
+def _stages(aid: str, up_to: str, detail: str = ""):
+    for s in P.STAGES:
+        state = "completed" if P.STAGES.index(s) < P.STAGES.index(up_to) else ("running" if s == up_to else "pending")
+        S.put("pipeline", {"id": aid + s, "analysis_id": aid, "stage": s, "state": state, "updated_at": time.time(), "detail": detail if s == up_to else ""})
+
+def _run(aid: str, records: list[dict], fname: str):
+    _stages(aid, "transforming")
+    meas = P.transform(records, fname)
+    S.put("datasets", {"id": aid + "DS", "analysis_id": aid, "schema_json": json.dumps(["timestamp","location","pollutant","value","unit"]), "record_count": len(meas)})
+    for m in meas:
+        S.put("measurements", {"id": m["record_id"], "dataset_id": aid + "DS", "timestamp": m["timestamp"], "location": m["location"], "lat": None, "lng": None, "pollutant": m["pollutant"], "value": m["value"], "unit": m["unit"], "source_file": m["source_file_id"], "source_row": m["source_row"], "quality_flags": json.dumps(m["quality_flags"])})
+    _stages(aid, "insights", f"{len(meas)} measurements")
+    return meas
+
+@r.post("/analyses")
+def create_analysis():
+    aid = P.analysis_id(str(time.time()) + uuid.uuid4().hex)
+    S.put("analysis_sessions", {"id": aid, "status": "created", "created_at": time.time(), "completed_at": None, "user_id": "demo"})
+    _stages(aid, "uploading")
+    S.put("audit_logs", {"id": uuid.uuid4().hex, "user_id": "demo", "action": "create", "entity": "analysis", "entity_id": aid, "created_at": time.time()})
+    return {"analysis_id": aid, "status": "created"}
+
+@r.get("/analyses")
+def list_analyses():
+    return {"analyses": S.all_q("SELECT * FROM analysis_sessions ORDER BY created_at DESC LIMIT 50")}
+
+@r.get("/analyses/{aid}")
+def get_analysis(aid: str):
+    a = S.one("SELECT * FROM analysis_sessions WHERE id=?", (aid,))
+    if not a: raise HTTPException(404, "no such analysis")
+    return a
+
+@r.post("/analyses/{aid}/text")
+def submit_text(aid: str, body: TextIn):
+    if not body.text.strip(): raise HTTPException(400, "empty submission rejected")
+    recs, meta = P.extract_records(body.filename, b"", body.text)
+    meas = _run(aid, recs, body.filename)
+    return {"analysis_id": aid, "records": len(meas), "format": meta["format"]}
+
+@r.post("/analyses/{aid}/files")
+async def upload_file(aid: str, f: UploadFile = File(...)):
+    content = await f.read()
+    if len(content) > 10 * 1024 * 1024: raise HTTPException(400, "file too large (10MB limit)")
+    try:
+        recs, meta = P.extract_records(f.filename or "upload.csv", content)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    meas = _run(aid, recs, f.filename or "upload")
+    return {"analysis_id": aid, "file_id": P.file_id(f.filename or "u", content), "format": meta.get("format"), "records": len(meas)}
+
+@r.get("/analyses/{aid}/status")
+def status(aid: str):
+    return {"analysis_id": aid, "stages": S.all_q("SELECT stage,state,detail FROM pipeline WHERE analysis_id=?", (aid,))}
+
+@r.get("/analyses/{aid}/events")
+def events(aid: str):
+    def gen():
+        import json as j
+        st = S.all_q("SELECT stage,state FROM pipeline WHERE analysis_id=?", (aid,))
+        yield "data: " + j.dumps({"stages": st}) + "\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+@r.get("/analyses/{aid}/datasets")
+def datasets(aid: str):
+    return {"datasets": S.all_q("SELECT * FROM datasets WHERE analysis_id=?", (aid,))}
+
+@r.get("/datasets/{did}/records")
+def records(did: str, page: int = 1, limit: int = 50):
+    off = (page - 1) * limit
+    rows = S.all_q("SELECT * FROM measurements WHERE dataset_id=? LIMIT ? OFFSET ?", (did, limit, off))
+    return {"records": rows, "page": page}
+
+@r.get("/datasets/{did}/quality")
+def quality(did: str):
+    rows = S.all_q("SELECT * FROM measurements WHERE dataset_id=?", (did,))
+    meas = [{"value": x["value"], "quality_flags": json.loads(x["quality_flags"] or "[]"), "location": x["location"]} for x in rows]
+    return P.quality_report(meas)
+
+@r.get("/datasets/{did}/export")
+def export(did: str):
+    import csv, io
+    rows = S.all_q("SELECT * FROM measurements WHERE dataset_id=?", (did,))
+    buf = io.StringIO(); w = csv.DictWriter(buf, fieldnames=["record_id" if False else "id","timestamp","location","pollutant","value","unit","quality_flags"])
+    w.writeheader()
+    for x in rows: w.writerow({k: x[k] for k in ["id","timestamp","location","pollutant","value","unit","quality_flags"]})
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv")
+
+@r.get("/analyses/{aid}/statistics")
+def statistics(aid: str):
+    rows = S.all_q("SELECT * FROM measurements WHERE dataset_id=?", (aid + "DS",))
+    meas = [{"value": x["value"], "quality_flags": json.loads(x["quality_flags"] or "[]"), "location": x["location"], "record_id": x["id"]} for x in rows]
+    return A.stats(meas)
+
+@r.get("/analyses/{aid}/comparison")
+def comparison(aid: str, prev: str = ""):
+    if not prev: return {"comparison_status": "unavailable", "reason": "no previous analysis"}
+    a = S.all_q("SELECT * FROM measurements WHERE dataset_id=?", (aid + "DS",))
+    b = S.all_q("SELECT * FROM measurements WHERE dataset_id=?", (prev + "DS",))
+    mk = lambda rows: A.stats([{"value": x["value"], "quality_flags": json.loads(x["quality_flags"] or "[]"), "location": x["location"], "record_id": x["id"]} for x in rows])
+    cur, prv = mk(a), mk(b)
+    return {"comparison_status": "completed", "previous_analysis_id": prev, "current_analysis_id": aid, "changes": A.compare(prv, cur)}
+
+class RecGen(BaseModel):
+    role: str = "ward"
+
+@r.post("/analyses/{aid}/recommendations/generate")
+def gen_recs(aid: str, body: RecGen):
+    rows = S.all_q("SELECT * FROM measurements WHERE dataset_id=?", (aid + "DS",))
+    ev = [x["id"] for x in rows[:2]]
+    out = []
+    for i, t in enumerate(C.for_role(body.role)[:5]):
+        rid = uuid.uuid4().hex[:8]
+        S.put("recommendations", {"id": rid, "analysis_id": aid, "role": body.role, "rank": 1 if i < 2 else 2 if i < 4 else 3, "text": t, "evidence": json.dumps(ev), "status": "proposed"})
+        out.append({"id": rid, "rank": 1 if i < 2 else 2 if i < 4 else 3, "text": t, "evidence": ev})
+    return {"recommendations": out}
+
+@r.get("/analyses/{aid}/recommendations")
+def list_recs(aid: str):
+    return {"recommendations": S.all_q("SELECT * FROM recommendations WHERE analysis_id=?", (aid,))}
+
+class RepGen(BaseModel):
+    kind: str = "internal"; lang: str = "en"; level: str = "general"
+
+@r.post("/analyses/{aid}/reports/generate")
+def gen_rep(aid: str, body: RepGen):
+    rid = uuid.uuid4().hex[:8]
+    S.put("reports", {"id": rid, "analysis_id": aid, "kind": body.kind, "lang": body.lang, "level": body.level, "status": "draft"})
+    content = f"# {body.kind} ({body.lang}/{body.level}) for {aid}\n\nGenerated from validated measurements. Vulnerable groups: children, older adults, sensitive people — see citizen advisory.\n"
+    S.put("report_versions", {"id": uuid.uuid4().hex[:8], "report_id": rid, "version": 1, "content": content, "created_at": time.time()})
+    return {"report_id": rid, "version": 1}
+
+@r.get("/reports/{rid}/versions")
+def rep_versions(rid: str):
+    return {"versions": S.all_q("SELECT * FROM report_versions WHERE report_id=? ORDER BY version", (rid,))}

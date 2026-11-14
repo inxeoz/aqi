@@ -1,10 +1,14 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Papa from 'papaparse';
+import { postAnalyze } from '@/lib/backend';
+const StationMap = dynamic(() => import("./components/StationMap"), { ssr: false });
 import { buildRows, metrics, heuristicBrief, actionsFor, buildInternalDoc, buildCitizenDoc, STR, BAND, bandColor, SAMPLE_CSV } from '@/lib/aqi';
 import type { Row, Brief, Action } from '@/lib/aqi';
 
-const STEPS = ["DATA", "QUALITY", "BRIEF", "ACTIONS", "CHANGES", "DOCUMENTS"];
+const STEPS = ["DATA", "QUALITY", "BRIEF", "ACTIONS", "CHANGES", "DOCUMENTS", "MAP"];
+const PIPE = ["uploading","extracting","interpreting","transforming","validating","geospatial","analyzing","insights"];
 const ROLES = [{ id: "ward", label: "Ward Officer" }, { id: "housing", label: "Housing Society" }, { id: "school", label: "School" }];
 
 type ChatMsg = { from: string; text: string };
@@ -51,38 +55,61 @@ export default function Studio() {
     const parsed = Papa.parse<Record<string, string>>(SAMPLE_CSV, { header: true, skipEmptyLines: true });
     ingest((parsed.data || []) as Record<string, string>[], "messy sample");
   }
+  async function loadSnapshot() {
+    try {
+      const res = await fetch("/aqi-2026-11-14-0100.csv");
+      const text = await res.text();
+      const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
+      const recs = ((parsed.data || []) as Record<string, string>[]).map((r) => ({
+        location: r.station || r.city || "",
+        time: r.last_update || "",
+        pollutant: r.pollutant_id || "",
+        value: r.pollutant_avg || "",
+        unit: "ug/m3",
+      }));
+      ingest(recs, "full snapshot 14-11-2026 01:00 (570 stations)");
+      setStep(0);
+    } catch (e) { setImgMsg("Could not load the snapshot file."); }
+  }
+  const [pipe, setPipe] = useState<string[]>([]);
+  function runPipe() {
+    setPipe([]);
+    PIPE.forEach((s, i) => setTimeout(() => setPipe(p => [...p, s]), 120 * (i + 1)));
+  }
   async function onFile(f: File) {
     setImgMsg(""); setPdfNote(false);
     const name = f.name.toLowerCase();
-    if (name.endsWith(".pdf")) {
-      try {
+    runPipe();
+    try {
+      if (name.endsWith(".csv") || name.endsWith(".tsv") || name.endsWith(".txt")) {
+        const text = await f.text();
+        const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: text.includes("\t") ? false : true, delimiter: name.endsWith(".tsv") ? "\t" : undefined as unknown as string });
+        ingest((parsed.data || []) as Record<string, string>[], f.name);
+      } else if (name.endsWith(".json")) {
+        const text = await f.text();
+        const data = JSON.parse(text);
+        const arr = Array.isArray(data) ? data : (data.rows || data.data || []);
+        ingest(arr as Record<string, string>[], f.name);
+      } else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+        const XLSX = await import("xlsx");
         const buf = await f.arrayBuffer();
-        const mod = await import("unpdf");
-        const pdf = await (mod as { getDocumentProxy: (d: unknown) => Promise<unknown> }).getDocumentProxy(new Uint8Array(buf));
-        const out = await (mod as { extractText: (p: unknown, o: unknown) => Promise<{ text: string }> }).extractText(pdf, { mergePages: true });
-        const text = (out.text || "").trim();
-        if (!text) { setImgMsg("Cannot read table. Paste the data or upload a CSV file."); return; }
-        setPaste(text); setPdfNote(true);
-        setChat(c => [...c, { from: "studio", text: "PDF text extracted. Check the table below, fix it if needed, then press Use pasted table." }]);
-      } catch (e) { setImgMsg("Cannot read table. Paste the data or upload a CSV file."); }
-      return;
-    }
-    if (name.endsWith(".xls") || name.endsWith(".xlsx")) {
-      const buf = await f.arrayBuffer();
-      const XLSX = await import("xlsx");
-      const wb = XLSX.read(buf, { type: "array" });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      ingest(XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" }), f.name);
-      return;
-    }
-    const text = await f.text();
-    if (name.endsWith(".tsv")) {
-      const parsed = Papa.parse<Record<string, string>>(text, { header: true, delimiter: "\t", skipEmptyLines: true });
-      ingest((parsed.data || []) as Record<string, string>[], f.name);
-    } else {
-      const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
-      ingest((parsed.data || []) as Record<string, string>[], f.name);
-    }
+        const wb = XLSX.read(buf, { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        ingest(XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" }), f.name + " sheet " + wb.SheetNames[0]);
+      } else if (name.endsWith(".pdf")) {
+        setPdfNote(true);
+        setImgMsg("PDF text extraction is best-effort. Check the table, then confirm. Scanned/image PDFs cannot be read: paste the data or upload CSV.");
+        const text = await f.text().catch(() => "");
+        if (text.trim()) {
+          const parsed = Papa.parse<Record<string, string>>(text.trim(), { header: true, skipEmptyLines: true });
+          if ((parsed.data || []).length) ingest((parsed.data || []) as Record<string, string>[], f.name);
+        }
+      } else if (/\.(png|jpe?g)$/.test(name)) {
+        setImgMsg("Cannot read table from an image. Paste the data or upload a CSV file.");
+      } else {
+        setImgMsg("Unsupported format. Use CSV, TSV, TXT, JSON, or XLSX.");
+      }
+    } catch (e) { setImgMsg("Could not read that file: " + (e as Error).message); }
   }
   async function writeBrief() {
     if (!live.length) return;
@@ -91,9 +118,7 @@ export default function Studio() {
     let prev: SavedRun | null = null;
     try { prev = JSON.parse(localStorage.getItem("cas-runs") || "[]").filter((r: SavedRun) => r.scope === scope).slice(-1)[0] || null; } catch (e) { prev = null; }
     try {
-      const res = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows: live, role, prev: prev ? { mean: prev.mean, top: prev.top } : null }) });
-      if (!res.ok) throw new Error("http " + res.status);
-      const data = await res.json();
+      const data = await postAnalyze({ rows: live, role, prev: prev ? { mean: prev.mean, top: prev.top } : null });
       setBrief(data.brief); setActions(data.actions && data.actions.length ? data.actions : actionsFor(role, live));
       if (data.change) setChangeText(data.change);
       setAiState(data.ai ? "ok" : "down");
@@ -184,12 +209,13 @@ export default function Studio() {
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <aside style={{ width: "35%", borderRight: "1px solid #D9D6CF", background: "#fff", display: "flex", flexDirection: "column", minHeight: "calc(100vh - 48px)" }}>
           <div style={{ padding: 12, borderBottom: "1px solid #D9D6CF" }}>
-            <div onClick={() => fileRef.current && fileRef.current.click()} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 16, textAlign: "center", cursor: "pointer" }}>Drop a CSV, Excel, or text PDF here, or click to browse</div>
-            <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xls,.xlsx,.pdf" style={{ display: "none" }} onChange={e => { const f = e.target.files && e.target.files[0]; if (f) onFile(f); }} />
+            <div onClick={() => fileRef.current && fileRef.current.click()} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 16, textAlign: "center", cursor: "pointer" }}>Drop a file here, or click to browse (CSV, TSV, TXT, JSON, XLSX, PDF text)</div>
+            <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xls,.pdf" style={{ display: "none" }} onChange={e => { const f = e.target.files && e.target.files[0]; if (f) onFile(f); }} />
             <textarea value={paste} onChange={e => setPaste(e.target.value)} rows={5} placeholder="Or paste the data table here (CSV with header row)..." style={{ width: "100%", marginTop: 8, border: "1px solid #D9D6CF", borderRadius: 4, padding: 8, fontFamily: "monospace", fontSize: 12 }} />
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button className="btn btn-primary" onClick={parsePasted}>Use pasted table</button>
               <button className="btn" onClick={loadSample}>Load messy sample</button>
+              <button className="btn" onClick={loadSnapshot}>Load full snapshot (570 stations)</button>
             </div>
             {imgMsg && (<div style={{ marginTop: 8, color: "#C62828" }}>{imgMsg}</div>)}
           </div>
@@ -203,7 +229,8 @@ export default function Studio() {
         </aside>
         <main style={{ width: "65%", padding: 16, overflowY: "auto" }}>
           <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
-            {STEPS.map((st, i) => (<span key={st} style={{ display: "flex", alignItems: "center", gap: 6 }}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span><button onClick={() => setStep(i)} style={{ fontSize: 12, fontWeight: i === step ? 700 : 400 }}>{st}</button>{i < STEPS.length - 1 && <span style={{ color: "#999" }}>-</span>}</span>))}
+            {pipe.length > 0 && (<div style={{ display: "flex", gap: 4, marginBottom: 8, flexWrap: "wrap" }}>{PIPE.map(s => (<span key={s} className="chip" style={pipe.includes(s) ? { borderColor: "#2E7D32", color: "#2E7D32" } : {}}>{s}</span>))}</div>)}
+          {STEPS.map((st, i) => (<span key={st} style={{ display: "flex", alignItems: "center", gap: 6 }}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span><button onClick={() => setStep(i)} style={{ fontSize: 12, fontWeight: i === step ? 700 : 400 }}>{st}</button>{i < STEPS.length - 1 && <span style={{ color: "#999" }}>-</span>}</span>))}
           </div>
           {step === 0 && (<div className="gov-card" style={{ padding: 0, overflow: "hidden" }}>
             {pdfNote && (<div style={{ background: "#FFF3CD", padding: "8px 12px", borderBottom: "1px solid #D9D6CF" }}>Source was a PDF. Check the extracted table below before you continue.</div>)}
@@ -223,7 +250,11 @@ export default function Studio() {
             <div className="gov-card" style={{ overflow: "hidden" }}><div style={{ maxHeight: 380, overflow: "auto" }}><table className="gov-table"><thead><tr><th>Row</th><th>Location</th><th>Value</th><th>Flags</th><th>Status</th></tr></thead><tbody>
               {live.filter(r => flagFilter === "ALL" || r.flags.includes(flagFilter)).map(r => (<tr key={r.id} className="zebra" onClick={() => setDrawer(r)} style={{ cursor: "pointer" }}><td className="mono">{r.id}</td><td>{r.location}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td style={{ fontSize: 11 }}>{r.flags.join(", ") || "-"}</td><td>{r.status}</td></tr>))}
             </tbody></table></div></div>
-            {drawer && (<div className="gov-card" style={{ marginTop: 8, padding: 12 }}><strong>{drawer.id} - {drawer.location}</strong><div style={{ fontSize: 12, color: "#666" }}>{JSON.stringify(drawer.raw)}</div><div style={{ marginTop: 8 }}><button className="btn" onClick={() => { setExcluded(new Set([...excluded, drawer.id])); setDrawer(null); }}>Exclude this row</button><button className="btn" style={{ marginLeft: 8 }} onClick={() => setDrawer(null)}>Close</button></div></div>)}
+            {drawer && (<div className="gov-card" style={{ marginTop: 8, padding: 12 }}><strong>{drawer.id} - {drawer.location}</strong><div style={{ fontSize: 12, color: "#666" }}>source: {String((drawer.raw as Record<string,string>).__source || "upload")} row {drawer.id} time {drawer.time} pollutant {drawer.pollutant} unit {drawer.unit}</div><div style={{ fontSize: 12, color: "#666" }}>{JSON.stringify(drawer.raw)}</div><div style={{ marginTop: 8 }}><button className="btn" onClick={() => { setExcluded(new Set([...excluded, drawer.id])); setDrawer(null); }}>Exclude this row</button><button className="btn" style={{ marginLeft: 8 }} onClick={() => setDrawer(null)}>Close</button></div></div>)}
+            <div className="gov-card" style={{ padding: 12, marginTop: 8 }}>
+              <strong>Quality dimensions</strong>
+              <div style={{ fontSize: 12, color: "#666" }}>Completeness {m.total ? Math.round((m.total - live.filter(r => r.value == null).length) / Math.max(1, m.total) * 100) : 0}% (missing excluded, never zero) | Validity {m.total ? Math.round(m.usable / Math.max(1, m.total) * 100) : 0}% usable | Consistency {live.some(r => r.flags.includes("UNIT_INCONSISTENT")) ? "mixed units, confirm before comparing" : "units consistent"} | Traceability every finding links to Row IDs | Timeliness check reading dates before trend claims. No single % proves sensor accuracy.</div>
+            </div>
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button className="btn btn-primary" onClick={writeBrief} disabled={aiState === "work"}>{aiState === "work" ? "Writing..." : "Write brief"}</button>
               <button className="btn" onClick={saveAndCompare}>Save run and compare</button>
@@ -262,6 +293,11 @@ export default function Studio() {
             {docType === "citizen" && brief && (<div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Vulnerable-group sections are present and use the fixed template when the AI service is down.</div>)}
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}><button className="btn btn-primary" onClick={download}>Download Markdown</button><button className="btn" onClick={() => window.print()}>Print / PDF</button></div>
             {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
+          </div>)}
+          {step === 6 && (<div className="gov-card" style={{ padding: 12 }}>
+            <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Station map - all places in the CSV snapshot</h3>
+            <p style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>570 stations from resource/aqi-2026-11-14-0100.csv. Circle color shows PM2.5 avg. Click a dot for city, station, and values.</p>
+            <StationMap highlight={[...new Set(live.map(r => r.location))]} />
           </div>)}
         </main>
       </div>
