@@ -11,17 +11,27 @@ class TextIn(BaseModel):
     text: str = ""
     filename: str = "pasted.csv"
 
+    @classmethod
+    def _check(cls, v: str) -> str:
+        if len(v) > 2 * 1024 * 1024:
+            raise ValueError("pasted text too large (2MB limit)")
+        return v
+
 def _stages(aid: str, up_to: str, detail: str = ""):
-    for s in P.STAGES:
-        state = "completed" if P.STAGES.index(s) < P.STAGES.index(up_to) else ("running" if s == up_to else "pending")
-        S.put("pipeline", {"id": aid + s, "analysis_id": aid, "stage": s, "state": state, "updated_at": time.time(), "detail": detail if s == up_to else ""})
+    now = time.time()
+    S.bulk("pipeline", [
+        {"id": aid + s, "analysis_id": aid, "stage": s,
+         "state": "completed" if P.STAGES.index(s) < P.STAGES.index(up_to) else ("running" if s == up_to else "pending"),
+         "updated_at": now, "detail": detail if s == up_to else ""}
+        for s in P.STAGES])
 
 def _run(aid: str, records: list[dict], fname: str):
     _stages(aid, "transforming")
     meas = P.transform(records, fname)
     S.put("datasets", {"id": aid + "DS", "analysis_id": aid, "schema_json": json.dumps(["timestamp","location","pollutant","value","unit"]), "record_count": len(meas)})
-    for m in meas:
-        S.put("measurements", {"id": m["record_id"], "dataset_id": aid + "DS", "timestamp": m["timestamp"], "location": m["location"], "lat": None, "lng": None, "pollutant": m["pollutant"], "value": m["value"], "unit": m["unit"], "source_file": m["source_file_id"], "source_row": m["source_row"], "quality_flags": json.dumps(m["quality_flags"])})
+    S.bulk("measurements", [
+        {"id": m["record_id"], "dataset_id": aid + "DS", "timestamp": m["timestamp"], "location": m["location"], "lat": None, "lng": None, "pollutant": m["pollutant"], "value": m["value"], "unit": m["unit"], "source_file": m["source_file_id"], "source_row": m["source_row"], "quality_flags": json.dumps(m["quality_flags"])}
+        for m in meas])
     _stages(aid, "insights", f"{len(meas)} measurements")
     return meas
 
@@ -47,6 +57,7 @@ def get_analysis(aid: str):
 def submit_text(aid: str, body: TextIn):
     if not body.text.strip(): raise HTTPException(400, "empty submission rejected")
     recs, meta = P.extract_records(body.filename, b"", body.text)
+    if len(recs) > 20000: raise HTTPException(400, "too many rows (20000 limit)")
     meas = _run(aid, recs, body.filename)
     return {"analysis_id": aid, "records": len(meas), "format": meta["format"]}
 
@@ -54,6 +65,7 @@ def submit_text(aid: str, body: TextIn):
 async def upload_file(aid: str, f: UploadFile = File(...)):
     content = await f.read()
     if len(content) > 10 * 1024 * 1024: raise HTTPException(400, "file too large (10MB limit)")
+    if len(content) == 0: raise HTTPException(400, "empty file rejected")
     try:
         recs, meta = P.extract_records(f.filename or "upload.csv", content)
     except ValueError as e:

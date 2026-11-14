@@ -49,7 +49,7 @@ def band(pm: float) -> str:
 
 
 def metrics(rows: list[dict]) -> dict:
-    ok = [r for r in rows if r.get("status") != "unreliable" and r.get("value") is not None]
+    ok = [r for r in rows if r.get("status") != "unreliable" and r.get("value") is not None and "UNIT_INCONSISTENT" not in (r.get("flags") or [])]
     vals = [float(r["value"]) for r in ok if isinstance(r.get("value"), (int, float))]
     mean = round(sum(vals) / len(vals), 1) if vals else 0
     by_loc: dict[str, list[float]] = {}

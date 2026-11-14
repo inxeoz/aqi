@@ -1,6 +1,6 @@
 """Analytics engine: pure-Python stats, no LLM."""
 def stats(meas: list[dict]) -> dict:
-    ok = [m for m in meas if m["value"] is not None and not any(f.startswith("invalid_value") or f in ("implausible_high", "duplicate", "missing_value") for f in m["quality_flags"])]
+    ok = [m for m in meas if m["value"] is not None and not any(f.startswith("invalid_value") or f in ("implausible_high", "duplicate", "missing_value", "unit_inconsistent") for f in m["quality_flags"])]
     vals = [m["value"] for m in ok]
     mean = round(sum(vals) / len(vals), 1) if vals else 0
     by = {}

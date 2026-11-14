@@ -2,6 +2,7 @@
 export type Row = {
   id: string; location: string; time: string; pollutant: string;
   value: number | null; unit: string; raw: Record<string,string>;
+  lat: number | null; lng: number | null;
   flags: string[]; status: string;
 };
 export type Finding = { text: string; cited_row_ids: string[] };
@@ -15,17 +16,6 @@ export function bandColor(b: string) {
   if (b === "Poor") return "#EF6C00";
   return "#C62828";
 }
-export const SAMPLE_CSV = [
-  "location,time,pollutant,value,unit",
-  "Shivaji Chowk,2026-11-10 08:00,PM2.5,168,ug/m3",
-  "Shivaji Chowk,2026-11-10 09:00,PM2.5,,ug/m3",
-  "Kothrud,2026-11-10 08:00,PM2.5,0.09,ppm",
-  "Kothrud,2026-11-10 09:00,PM2.5,132,ug/m3",
-  "Hadapsar,2026-11-10 08:00,PM2.5,210,ug/m3",
-  "Hadapsar,2026-11-10 09:00,PM2.5,-12,ug/m3",
-  "Shivaji Chowk,2026-11-10 08:00,PM2.5,168,ug/m3",
-  "Baner,2026-11-11 08:00,PM2.5,95,ug/m3",
-].join("\n");
 export function buildRows(records: Record<string,string>[]): Row[] {
   const pick = (r: Record<string,string>, ...names: string[]) => {
     const keys = Object.keys(r);
@@ -40,6 +30,10 @@ export function buildRows(records: Record<string,string>[]): Row[] {
     const rawVal = pick(r, "value", "concentration", "reading", "level", "pm2.5", "pm25");
     const unit = pick(r, "unit", "units") || "ug/m3";
     const flags: string[] = [];
+    const num = (v: string) => { const n = Number(String(v ?? "").trim()); return (v === "" || v == null || Number.isNaN(n)) ? null : n; };
+    const lat = num(pick(r, "latitude", "lat", "y"));
+    const lng = num(pick(r, "longitude", "lng", "lon", "long", "x"));
+    if ((lat != null && (lat < -90 || lat > 90)) || (lng != null && (lng < -180 || lng > 180))) flags.push("INVALID_COORDS");
     let value: number | null = (rawVal === "" || rawVal == null) ? null : Number(String(rawVal).trim());
     if (rawVal === "" || rawVal == null || (value != null && Number.isNaN(value))) { flags.push("MISSING_VALUE"); value = null; }
     if (value != null && !Number.isNaN(value) && value < 0) flags.push("NEGATIVE_VALUE");
@@ -47,7 +41,7 @@ export function buildRows(records: Record<string,string>[]): Row[] {
     const key = location + "|" + time + "|" + pollutant + "|" + rawVal;
     if (seen.has(key)) flags.push("DUPLICATE_ROW");
     seen.add(key);
-    return { id: rid(i), location, time, pollutant, value, unit, raw: r, flags, status: "usable" };
+    return { id: rid(i), location, time, pollutant, value, unit, raw: r, lat, lng, flags, status: "usable" };
   });
   const units = new Set(rows.map(r => r.unit.toLowerCase()));
   const hasPpm = [...units].some(u => u.indexOf("ppm") >= 0 || u === "ppb");
@@ -65,7 +59,7 @@ export function buildRows(records: Record<string,string>[]): Row[] {
   return rows;
 }
 export function metrics(rows: Row[]) {
-  const ok = rows.filter(r => r.status !== "unreliable" && r.value != null);
+  const ok = rows.filter(r => r.status !== "unreliable" && r.value != null && !r.flags.includes("UNIT_INCONSISTENT"));
   const vals = ok.map(r => r.value as number);
   const mean = vals.length ? vals.reduce((a,b) => a+b, 0) / vals.length : 0;
   const byLoc: Record<string, number[]> = {};
@@ -181,7 +175,7 @@ export function buildCitizenDoc(rows: Row[], brief: Brief, actions: Action[], la
   out.push(L1(vulnSection("sens", lang)));
   out.push("");
   out.push("## " + s.updates);
-  out.push(L1(brief.trends[0] ? brief.trends[0].text : "New readings will be shared tomorrow."));
+  out.push(L1(top ? ("Pollution is worst in " + top.loc + ". We will share new readings tomorrow.") : "New readings will be shared tomorrow."));
   out.push("");
   out.push("_" + s.disclaimer + "_");
   out.push("");

@@ -66,7 +66,19 @@ Open http://localhost:3000.
 - Added `.env.example` with key names only. Real keys stay in `.env.local` (ignored).
 - AI route now runs through the `opencode run` CLI instead of direct OpenAI HTTP. Model names come from env, with free-tier defaults.
 
-## 6. Gen AI services utilized
+## 6. Testing
+- Backend: `cd backend && .venv/bin/python -m pytest tests/ -q` (10 tests: transformation flags, validation counts, stats exclusions, comparison math, role catalogs, full `/api/v1` flow, upload/text limits, citation validity).
+- Frontend: `cd frontend && npm test` (vitest, 7 tests: quality flags, mean exclusions, role differences, reading levels, citizen-doc rules).
+- Lint: `cd frontend && npx eslint app lib` (0 errors) and `cfs lint app` (test IDs).
+
+## 7. Security notes
+- Keys live only in `backend/.env` / `frontend/.env.local` (git-ignored). Examples carry no secrets.
+- Uploads capped at 10MB client + server, pasted text at 2MB, 20,000 rows max per analysis. Empty files rejected.
+- CORS allows only `FRONTEND_URL` (default `http://localhost:3000`), not `*`.
+- Mixed-unit rows are flagged and excluded from averages, never silently merged.
+- User text in map popups is HTML-escaped.
+
+## 8. Gen AI services utilized
 - Runner: Adaption gateway (`app/services/ai.py`, SDK `adaption`, `POST /api/v1/responses`) from `backend/main.py` (`POST /api/analyze`). Set `ADAPTION_API_KEY` in `backend/.env`. Falls back to `opencode run --model <name> --format json` when no key is set, then to the heuristic template. The old Next.js route is removed; the frontend calls the backend through `frontend/lib/backend.ts`.
 - Analyst model (env `ANALYST_MODEL`, fallback `AI_MODEL`, default `opencode-go/beam-free#low`): reads only calculated metrics (mean, location means, worst IDs) plus a sample of flagged rows. Returns strict JSON validated by Zod: trends, hotspots, gaps, each with text and cited_row_ids. Used in the BRIEF step.
 - Writer model (env `WRITER_MODEL`, fallback `AI_MODEL`, default `opencode-go/beam-free#low`): writes the 150-word change summary for a ward officer in the CHANGES step. Used only for wording, not numbers.

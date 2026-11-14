@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 
-type St = { state: string; city: string; station: string; lat: number; lng: number; pm25: number | null; pm10: number | null };
+export type MapRow = { location: string; value: number | null; lat: number | null; lng: number | null };
 
 function color(pm: number | null) {
   if (pm == null) return "#999";
@@ -19,35 +19,53 @@ function factor(pm: number | null) {
   return 3;
 }
 
-type UserRow = { location: string; value: number | null };
-const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-
-export default function StationMap({ userRows = [] as UserRow[] }) {
-  const [stations, setStations] = useState<St[]>([]);
+export default function StationMap({ userRows = [] as MapRow[] }) {
   const [filter, setFilter] = useState("ALL");
   const [showEffect, setShowEffect] = useState(true);
   const [baseKm, setBaseKm] = useState(5);
   const divRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const layerRef = useRef<import("leaflet").LayerGroup | null>(null);
-  // match uploaded locations to known stations by station/city name
-  const matched = useRef(new Map<string, St>());
-  const unmatched = [...new Set(userRows.map(r => r.location))].filter(loc => {
-    const n = norm(loc);
-    const hit = stations.find(s => norm(s.station) === n || norm(s.station).includes(n) || norm(s.city) === n);
-    if (hit) matched.current.set(loc, hit);
-    else matched.current.delete(loc);
-    return !hit;
-  });
-  const userVals = new Map<string, number[]>();
-  userRows.forEach(r => { if (r.value != null && matched.current.has(r.location)) userVals.set(r.location, [...(userVals.get(r.location) || []), r.value]); });
-  const userAvg = new Map<string, number>([...userVals.entries()].map(([k, vs]) => [k, vs.reduce((a, b) => a + b, 0) / vs.length]));
-  const hlRef = useRef<string[]>([...matched.current.keys()]);
-  hlRef.current = [...matched.current.keys()];
 
-  useEffect(() => {
-    fetch("/stations.json").then((r) => r.json()).then(setStations).catch(() => setStations([]));
-  }, []);
+  const placed = userRows.filter(r => r.lat != null && r.lng != null && r.value != null);
+  const unplaced = [...new Set(userRows.filter(r => r.lat == null || r.lng == null).map(r => r.location))].sort();
+
+  function draw(L: typeof import("leaflet")) {
+    const map = mapRef.current;
+    const layer = layerRef.current;
+    if (!map || !layer) return;
+    layer.clearLayers();
+    const shown = placed.filter((r) => {
+      if (filter === "SEVERE") return (r.value ?? 0) >= 250;
+      if (filter === "POOR+") return (r.value ?? 0) >= 120;
+      if (filter === "MISSING") return r.value == null;
+      return true;
+    });
+    const bounds: [number, number][] = [];
+    shown.forEach((r) => {
+      if (showEffect) {
+        L.circle([r.lat as number, r.lng as number], {
+          radius: baseKm * 1000 * factor(r.value),
+          color: color(r.value),
+          weight: 1,
+          fillColor: color(r.value),
+          fillOpacity: 0.18,
+        }).addTo(layer);
+      }
+      const c = L.circleMarker([r.lat as number, r.lng as number], {
+        radius: 6,
+        color: "#0B5D66",
+        weight: 1,
+        fillColor: color(r.value),
+        fillOpacity: 0.9,
+      }).addTo(layer);
+      const esc = String(r.location).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      c.bindPopup(`<strong>${esc}</strong><br/>PM2.5: ${Number(r.value)}<br/>effect radius: ${(baseKm * factor(r.value)).toFixed(1)} km`);
+      bounds.push([r.lat as number, r.lng as number]);
+    });
+    if (bounds.length) map.fitBounds(bounds as L.LatLngBoundsExpression, { padding: [20, 20] });
+    else map.setView([18.52, 73.85], 11);
+  }
 
   // Create the map exactly once.
   useEffect(() => {
@@ -57,7 +75,7 @@ export default function StationMap({ userRows = [] as UserRow[] }) {
       const L = (await import("leaflet")).default;
       await import("leaflet/dist/leaflet.css");
       if (!alive || !divRef.current || mapRef.current) return;
-      const map = L.map(divRef.current).setView([23.5, 79.5], 5);
+      const map = L.map(divRef.current).setView([18.52, 73.85], 11);
       mapRef.current = map;
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap contributors",
@@ -65,9 +83,7 @@ export default function StationMap({ userRows = [] as UserRow[] }) {
       layerRef.current = L.layerGroup().addTo(map);
       draw(L);
     })();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -79,52 +95,17 @@ export default function StationMap({ userRows = [] as UserRow[] }) {
       draw(L);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stations, filter, showEffect, baseKm, JSON.stringify(highlight)]);
+  }, [userRows, filter, showEffect, baseKm, JSON.stringify(userRows)]);
 
-  function draw(L: typeof import("leaflet")) {
-    const map = mapRef.current;
-    const layer = layerRef.current;
-    if (!map || !layer || !stations.length) return;
-    layer.clearLayers();
-    const hl = hlRef.current;
-    const shown = stations.filter((s) => {
-      if (filter === "SEVERE") return (s.pm25 ?? 0) >= 250;
-      if (filter === "POOR+") return (s.pm25 ?? 0) >= 120;
-      if (filter === "MISSING") return s.pm25 == null;
-      return true;
-    });
-    const bounds: [number, number][] = [];
-    shown.forEach((s) => {
-      if (showEffect) {
-        L.circle([s.lat, s.lng], {
-          radius: baseKm * 1000 * factor(s.pm25),
-          color: color(s.pm25),
-          weight: 1,
-          fillColor: color(s.pm25),
-          fillOpacity: 0.18,
-        }).addTo(layer);
-      }
-      const c = L.circleMarker([s.lat, s.lng], {
-        radius: hl.includes(s.station) ? 8 : 5,
-        color: hl.includes(s.station) ? "#0B5D66" : color(s.pm25),
-        weight: hl.includes(s.station) ? 3 : 1,
-        fillColor: color(s.pm25),
-        fillOpacity: 0.9,
-      }).addTo(layer);
-      const upLoc = [...matched.current.entries()].find(([, st]) => st.station === s.station)?.[0];
-      const upAvg = upLoc != null ? userAvg.get(upLoc) : undefined;
-      c.bindPopup(
-        `<strong>${s.city}</strong><br/>${s.station}<br/>` +
-        (upAvg != null ? `<strong>Your reading: ${upAvg.toFixed(0)} ug/m3 (${upLoc})</strong><br/>` : "") +
-        `PM2.5: ${s.pm25 ?? "-"} | PM10: ${s.pm10 ?? "-"}<br/>effect radius: ${(baseKm * factor(s.pm25)).toFixed(1)} km<br/>${s.state}`
-      );
-      bounds.push([s.lat, s.lng]);
-    });
-    if (bounds.length) map.fitBounds(bounds as L.LatLngBoundsExpression, { padding: [20, 20] });
-  }
 
   return (
     <div>
+      {placed.length === 0 && (
+        <div style={{ background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px", marginBottom: 8 }}>
+          No mappable places yet. Add <span className="mono">latitude</span> and <span className="mono">longitude</span> columns
+          to your upload to draw it here. Rows without coordinates are listed below, never guessed.
+        </div>
+      )}
       <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
         {["ALL", "POOR+", "SEVERE", "MISSING"].map((f) => (
           <button key={f} data-testid="StationMap:button-filter" className="chip" onClick={() => setFilter(f)}
@@ -140,9 +121,9 @@ export default function StationMap({ userRows = [] as UserRow[] }) {
             onChange={(e) => setBaseKm(Number(e.target.value))} style={{ width: 110 }} />
           <span className="mono">{baseKm} km</span>
         </label>
-        <span style={{ fontSize: 12, color: "#666" }}>{stations.length} stations, snapshot 14-11-2026 01:00</span>
+        <span style={{ fontSize: 12, color: "#666" }}>{placed.length} mapped place(s)</span>
       </div>
-      <div ref={divRef} style={{ height: 480, width: "100%", borderRadius: 6, border: "1px solid #D9D6CF", zIndex: 0 }} />
+      <div ref={divRef} role="application" aria-label="Map of uploaded air quality readings" style={{ height: 480, width: "100%", borderRadius: 6, border: "1px solid #D9D6CF", zIndex: 0 }} />
       <div style={{ display: "flex", gap: 12, fontSize: 12, marginTop: 6, flexWrap: "wrap" }}>
         <span><i style={{ color: "#2E7D32" }}>●</i> ≤60 (x0.5)</span>
         <span><i style={{ color: "#F9A825" }}>●</i> 61–120 (x1)</span>
@@ -153,10 +134,9 @@ export default function StationMap({ userRows = [] as UserRow[] }) {
       <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
         Effect radius = base radius x severity factor. Example at {baseKm} km base: severe = {(baseKm * 3).toFixed(0)} km, poor = {(baseKm * 2).toFixed(0)} km.
       </div>
-      {userRows.length > 0 && (
-        <div style={{ fontSize: 12, marginTop: 8 }}>
-          {matched.current.size > 0 && (<div style={{ color: "#2E7D32" }}>Matched {matched.current.size} uploaded place(s): {[...matched.current.keys()].join(", ")}</div>)}
-          {unmatched.length > 0 && (<div style={{ color: "#C62828" }}>Could not place {unmatched.length} uploaded location(s): {unmatched.join(", ")}. Use a station or city name to map them.</div>)}
+      {unplaced.length > 0 && (
+        <div style={{ fontSize: 12, marginTop: 8, color: "#C62828" }}>
+          Could not place {unplaced.length} location(s) — no coordinates in upload: {unplaced.join(", ")}.
         </div>
       )}
     </div>

@@ -58,12 +58,6 @@ export default function Studio() {
     setRows(built); setUpFiles([{ name: sourceNote, size: 0 }]);
     resetAfter();
   }
-  function append(records: Record<string, string>[], sourceNote: string) {
-    const merged = [...rows.map(r => r.raw as Record<string, string>), ...tag(records, sourceNote)];
-    const built = reid(buildRows(merged));
-    setRows(built); setUpFiles(f => [...f, { name: sourceNote, size: 0 }]);
-    resetAfter();
-  }
   function resetAfter() {
     setPlace("all");
     setExcluded(new Set()); setBrief(null); setActions([]); setDocAi(""); setDocAiState("idle");
@@ -110,13 +104,16 @@ export default function Studio() {
       const data = (parsed.data || []) as Record<string, string>[];
       if (!data.length || Object.keys(data[0] || {}).length < 2) throw new Error("no table found");
       return { recs: tag(data, f.name), note: f.name };
-    } catch (e2) {
+    } catch {
       throw new Error("Could not read " + f.name + " as a data table. Paste the contents as text instead.");
     }
   }
   async function onFiles(fs: FileList | File[]) {
-    setImgMsg(""); setPdfNote(false); runPipe();
+    setImgMsg(""); setPdfNote(false);
     const list = [...fs];
+    const big = list.find(f => f.size > 10 * 1024 * 1024);
+    if (big) { setImgMsg(big.name + " is over the 10MB limit. Split it or paste a smaller table."); return; }
+    runPipe();
     const first = rows.length === 0;
     try {
       const parts: { recs: Record<string, string>[]; note: string }[] = [];
@@ -139,14 +136,14 @@ export default function Studio() {
       const recs = tag((parsed.data || []) as Record<string, string>[], "pasted text");
       if (rows.length) { setRows(reid(buildRows([...rows.map(r => r.raw as Record<string, string>), ...recs]))); }
       else ingest(recs, "pasted text");
-    } catch (e) { setImgMsg("Could not read the pasted table."); }
+    } catch { setImgMsg("Could not read the pasted table."); }
   }
   async function writeBrief() {
     if (!scoped.length) return;
     setAiState("work"); setNotice("");
     const scope = place === "all" ? [...new Set(scoped.map(r => r.location))].sort().join(", ") : place;
     let prev: SavedRun | null = null;
-    try { prev = JSON.parse(localStorage.getItem("cas-runs") || "[]").filter((r: SavedRun) => r.scope === scope).slice(-1)[0] || null; } catch (e) { prev = null; }
+    try { prev = JSON.parse(localStorage.getItem("cas-runs") || "[]").filter((r: SavedRun) => r.scope === scope).slice(-1)[0] || null; } catch {prev = null; }
     try {
       const data = await postAnalyze({ rows: scoped, role, prev: prev ? { mean: prev.mean, top: prev.top } : null });
       setBrief(data.brief); setActions(data.actions && data.actions.length ? data.actions : actionsFor(role, scoped));
@@ -155,7 +152,7 @@ export default function Studio() {
       if (data.notice) setNotice(data.notice);
       if (!data.ai && !data.notice) setNotice("The AI service is not available. Showing the standard template instead.");
       go(2);
-    } catch (e) {
+    } catch {
       setBrief(heuristicBrief(scoped)); setActions(actionsFor(role, scoped));
       setAiState("down"); setNotice("The AI service is not available. Showing the standard template instead.");
       go(2);
@@ -169,7 +166,7 @@ export default function Studio() {
   function saveAndCompare() {
     const scope = (place === "all" ? "all" : "place:" + place) + "|" + [...new Set(scoped.map(r => r.location))].sort().join(", ");
     let all: SavedRun[] = [];
-    try { all = JSON.parse(localStorage.getItem("cas-runs") || "[]"); } catch (e) { all = []; }
+    try { all = JSON.parse(localStorage.getItem("cas-runs") || "[]"); } catch {all = []; }
     const prev = all.filter(r => r.scope === scope).slice(-1)[0] || null;
     const cur = { id: "R" + Date.now(), time: new Date().toISOString(), scope, mean: m.mean, top: m.locMean[0] ? m.locMean[0].loc : "-", rows: scoped };
     if (prev) {
@@ -187,21 +184,19 @@ export default function Studio() {
       setChangeRows(m.locMean.map(l => ({ loc: l.loc, prev: null, cur: Math.round(l.mean * 10) / 10 })));
       setChangeText("This is the first brief for this area. No previous brief exists, so there is nothing to compare yet.");
     }
-    try { localStorage.setItem("cas-runs", JSON.stringify([...all, cur].slice(-20))); } catch (e) { setNotice("Could not save this run in this browser (storage blocked)."); }
+    try { localStorage.setItem("cas-runs", JSON.stringify([...all, cur].slice(-20))); } catch {setNotice("Could not save this run in this browser (storage blocked)."); }
     go(4);
   }
-  async function writeDocument() {
+  async function writeDocument(kind: string = docType, langV: string = lang, levelV: string = level) {
     if (!brief) return;
     setDocAiState("work");
     try {
-      const data = await postDocument({ brief, actions, changeText, kind: docType, lang, level, role, place });
+      const data = await postDocument({ brief, actions, changeText, kind, lang: langV, level: levelV, role, place });
       if (data.ai && data.text) { setDocAi(data.text); setDocAiState("ok"); }
       else { setDocAi(""); setDocAiState("down"); }
-    } catch (e) { setDocAi(""); setDocAiState("down"); }
+    } catch {setDocAi(""); setDocAiState("down"); }
   }
-  useEffect(() => {
-    if (step === 5 && brief && docAiState === "idle") writeDocument();
-  });
+
   const templateText = useMemo(() => {
     if (!brief) return "";
     return docType === "internal" ? buildInternalDoc(scoped, brief, actions, changeText, lang, level) : buildCitizenDoc(scoped, brief, actions, lang, level);
@@ -218,7 +213,7 @@ export default function Studio() {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
-    } catch (e) {
+    } catch {
       const w = window.open("", "_blank");
       if (w) w.document.write("<pre>" + docText.replace(/</g, "&lt;") + "</pre>");
       else setImgMsg("Download was blocked by the browser. Copy the document text manually.");
@@ -229,9 +224,12 @@ export default function Studio() {
   }
   const s = STR[lang] || STR.en;
   const [runCount, setRunCount] = useState(0);
-  useEffect(() => { try { setRunCount(JSON.parse(localStorage.getItem("cas-runs") || "[]").length); } catch (e) { setRunCount(0); } }, []);
+  // mount-only read: keeps server and client HTML identical (hydration-safe)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-only store read, keeps SSR HTML identical
+  useEffect(() => { try { setRunCount(JSON.parse(localStorage.getItem("cas-runs") || "[]").length); } catch { setRunCount(0); } }, []);
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+      <a href="#main-content" className="skip-link">Skip to content</a>
       <header data-testid="page:header-app" style={{ height: 52, background: "#fff", borderBottom: "1px solid #D9D6CF", display: "flex", alignItems: "center", padding: "0 16px", gap: 12 }}>
         <strong>Civic Air Quality Briefing Studio</strong>
         <span style={{ color: "#666" }}>Pune Municipal Corporation</span>
@@ -240,35 +238,35 @@ export default function Studio() {
         <span className="chip" style={aiState === "down" ? { borderColor: "#C62828", color: "#C62828" } : {}}>{aiState === "down" ? "AI offline" : aiState === "ok" ? "AI online" : "AI standby"}</span>
       </header>
       {aiState === "down" && (<div style={{ background: "#FFF3CD", borderBottom: "1px solid #D9D6CF", padding: "8px 16px" }}>The AI service is not available. Your data and quality report stay on screen. <button data-testid="page:button-retry" className="btn" style={{ marginLeft: 8 }} onClick={writeBrief}>Retry</button></div>)}
-      <nav data-testid="page:nav-steps" style={{ display: "flex", gap: 4, padding: "10px 16px", background: "#F7F6F3", borderBottom: "1px solid #D9D6CF", flexWrap: "wrap" }}>
-        {STEPS.filter((st, i) => i <= maxReached || st === "MAP").map((st, i) => (<button key={st} data-testid="page:button-step" onClick={() => go(STEPS.indexOf(st))} className="btn" style={i === step ? { borderColor: "#0B5D66", color: "#0B5D66", fontWeight: 700 } : {}}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span> {st}</button>))}
+      <nav data-testid="page:nav-steps" aria-label="Analysis steps" style={{ display: "flex", gap: 4, padding: "10px 16px", background: "#F7F6F3", borderBottom: "1px solid #D9D6CF", flexWrap: "wrap" }}>
+        {STEPS.filter((st, i) => i <= maxReached || st === "MAP").map((st, i) => (<button key={st} data-testid="page:button-step" onClick={() => go(STEPS.indexOf(st))} className="btn" aria-current={i === step ? "step" : undefined} style={i === step ? { borderColor: "#0B5D66", color: "#0B5D66", fontWeight: 700 } : {}}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span> {st}</button>))}
       </nav>
       {pipe.length > 0 && (<div style={{ display: "flex", gap: 4, padding: "8px 16px", flexWrap: "wrap", background: "#fff", borderBottom: "1px solid #D9D6CF" }}>{PIPE.map(p => (<span key={p} className="chip" style={pipe.includes(p) ? { borderColor: "#2E7D32", color: "#2E7D32" } : {}}>{p}</span>))}</div>)}
-      <main data-testid="page:main-content" style={{ padding: 16, maxWidth: 1100, width: "100%", margin: "0 auto" }}>
+      <main id="main-content" data-testid="page:main-content" tabIndex={-1} style={{ padding: 16, maxWidth: 1100, width: "100%", margin: "0 auto" }}>
         {step === 0 && (<div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="gov-card" style={{ padding: 16 }}>
               <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Upload files</h3>
-              <div onClick={() => fileRef.current && fileRef.current.click()} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 24, textAlign: "center", cursor: "pointer" }}>Drop files here, or click to browse<br /><span style={{ fontSize: 12, color: "#666" }}>Any data file: CSV, TSV, TXT, JSON, XLSX, or paste text. Several files allowed.</span></div>
-              <input data-testid="page:input-files" ref={fileRef} type="file" multiple style={{ display: "none" }} onChange={e => { if (e.target.files && e.target.files.length) onFiles(e.target.files); e.target.value = ""; }} />
+              <div role="button" tabIndex={0} aria-label="Upload data files" onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { if (fileRef.current) fileRef.current.click(); } }} onClick={() => { if (fileRef.current) fileRef.current.click(); }} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 24, textAlign: "center", cursor: "pointer" }}>Drop files here, or click to browse<br /><span style={{ fontSize: 12, color: "#666" }}>Any data file: CSV, TSV, TXT, JSON, XLSX, or paste text. Several files allowed.</span></div>
+              <input data-testid="page:input-files" ref={fileRef} type="file" multiple aria-label="Choose data files" style={{ display: "none" }} onChange={e => { if (e.target.files && e.target.files.length) onFiles(e.target.files); e.target.value = ""; }} />
               {upFiles.length > 0 && (<table data-testid="page:table-files" className="gov-table" style={{ marginTop: 12 }}><thead><tr><th>File</th><th></th></tr></thead><tbody>
                 {upFiles.map(f => (<tr key={f.name}><td className="mono">{f.name}</td><td><button data-testid="page:button-remove-file" className="btn" onClick={() => removeFile(f.name)}>Remove</button></td></tr>))}
               </tbody></table>)}
               {pdfNote && (<div style={{ marginTop: 8, background: "#FFF3CD", padding: "8px 12px", borderRadius: 4 }}>Source was a PDF. Check the extracted table below before you continue.</div>)}
             </div>
             <div className="gov-card" style={{ padding: 16 }}>
-              <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Paste text</h3>
-              <textarea data-testid="page:textarea-paste" value={paste} onChange={e => setPaste(e.target.value)} rows={9} placeholder={"location,time,pollutant,value,unit\nShivaji Chowk,2026-11-10 08:00,PM2.5,168,ug/m3"} style={{ width: "100%", border: "1px solid #D9D6CF", borderRadius: 4, padding: 8, fontFamily: "monospace", fontSize: 12 }} />
+              <h3 style={{ fontWeight: 700, marginBottom: 8 }}><label htmlFor="paste-input">Paste text</label></h3>
+              <textarea id="paste-input" data-testid="page:textarea-paste" value={paste} onChange={e => setPaste(e.target.value)} rows={9} aria-describedby="paste-hint" placeholder={"location,time,pollutant,value,unit\nShivaji Chowk,2026-11-10 08:00,PM2.5,168,ug/m3"} style={{ width: "100%", border: "1px solid #D9D6CF", borderRadius: 4, padding: 8, fontFamily: "monospace", fontSize: 12 }} />
               <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                 <button data-testid="page:button-add-paste" className="btn btn-primary" onClick={parsePasted}>Add pasted table</button>
-                <span style={{ fontSize: 12, color: "#666", alignSelf: "center" }}>Empty submissions are rejected. Original files stay unchanged.</span>
+                <span id="paste-hint" style={{ fontSize: 12, color: "#666", alignSelf: "center" }}>Empty submissions are rejected. Original files stay unchanged.</span>
               </div>
             </div>
           </div>
-          {imgMsg && (<div style={{ marginTop: 12, color: "#C62828" }}>{imgMsg}</div>)}
+          {imgMsg && (<div role="alert" style={{ marginTop: 12, color: "#C62828" }}>{imgMsg}</div>)}
           <div className="gov-card" style={{ padding: 0, overflow: "hidden", marginTop: 12 }}>
             {!rows.length && (<div style={{ padding: 24, color: "#666" }}>No data yet. Upload a file, paste a table, or load a sample.</div>)}
-            {rows.length > 0 && (<div style={{ maxHeight: 420, overflow: "auto" }}><table data-testid="page:table-preview" className="gov-table"><thead><tr><th>Row</th><th>Location</th><th>Time</th><th>Pollutant</th><th>Value</th><th>Unit</th><th>Source</th><th>Flags</th></tr></thead><tbody>
+            {rows.length > 0 && (<div style={{ maxHeight: 420, overflow: "auto" }}><table data-testid="page:table-preview" className="gov-table"><thead><tr><th scope="col">Row</th><th>Location</th><th>Time</th><th>Pollutant</th><th>Value</th><th>Unit</th><th>Source</th><th>Flags</th></tr></thead><tbody>
               {rows.map(r => (<tr key={r.id} className={"zebra" + (flash === r.id ? " flash" : "")} id={"row-" + r.id}><td className="mono">{r.id}</td><td>{r.location}</td><td>{r.time}</td><td>{r.pollutant}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td>{r.unit}</td><td style={{ fontSize: 11 }}>{String((r.raw as Record<string, string>).__source || "-")}</td><td>{r.flags.length ? r.flags.join(", ") : "-"}</td></tr>))}
             </tbody></table></div>)}
             {rows.length > 0 && (<div style={{ padding: 12 }}><button data-testid="page:button-confirm-quality" className="btn btn-primary" onClick={() => go(1)}>Confirm and check quality</button></div>)}
@@ -285,15 +283,15 @@ export default function Studio() {
           <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
             {["ALL", "MISSING_VALUE", "NEGATIVE_VALUE", "IMPLAUSIBLE_HIGH", "UNIT_INCONSISTENT", "DUPLICATE_ROW", "STALE_GAP"].map(f => (<button key={f} data-testid="page:button-flag" className="chip" onClick={() => setFlagFilter(f)} style={flagFilter === f ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}}>{f}</button>))}
           </div>
-          <div className="gov-card" style={{ overflow: "hidden" }}><div style={{ maxHeight: 380, overflow: "auto" }}><table data-testid="page:table-quality" className="gov-table"><thead><tr><th>Row</th><th>Location</th><th>Value</th><th>Flags</th><th>Status</th></tr></thead><tbody>
-            {live.filter(r => flagFilter === "ALL" || r.flags.includes(flagFilter)).map(r => (<tr key={r.id} className="zebra" onClick={() => setDrawer(r)} style={{ cursor: "pointer" }}><td className="mono">{r.id}</td><td>{r.location}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td style={{ fontSize: 11 }}>{r.flags.join(", ") || "-"}</td><td>{r.status}</td></tr>))}
+          <div className="gov-card" style={{ overflow: "hidden" }}><div style={{ maxHeight: 380, overflow: "auto" }}><table data-testid="page:table-quality" className="gov-table"><thead><tr><th scope="col">Row</th><th>Location</th><th>Value</th><th>Flags</th><th>Status</th></tr></thead><tbody>
+            {live.filter(r => flagFilter === "ALL" || r.flags.includes(flagFilter)).map(r => (<tr key={r.id} className="zebra" tabIndex={0} onKeyDown={e => { if (e.key === "Enter") setDrawer(r); }} onClick={() => setDrawer(r)} style={{ cursor: "pointer" }}><td className="mono">{r.id}</td><td>{r.location}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td style={{ fontSize: 11 }}>{r.flags.join(", ") || "-"}</td><td>{r.status}</td></tr>))}
           </tbody></table></div></div>
           {drawer && (<div className="gov-card" style={{ marginTop: 8, padding: 12 }}><strong>{drawer.id} - {drawer.location}</strong><div style={{ fontSize: 12, color: "#666" }}>source: {String((drawer.raw as Record<string, string>).__source || "upload")} row {drawer.id} time {drawer.time} pollutant {drawer.pollutant} unit {drawer.unit}</div><div style={{ fontSize: 12, color: "#666" }}>{JSON.stringify(drawer.raw)}</div><div style={{ marginTop: 8 }}><button data-testid="page:button-exclude-row" className="btn" onClick={() => { setExcluded(new Set([...excluded, drawer.id])); setDrawer(null); }}>Exclude this row</button><button className="btn" data-testid="page:button-close-drawer" style={{ marginLeft: 8 }} onClick={() => setDrawer(null)}>Close</button></div></div>)}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
             <button data-testid="page:button-write-brief" className="btn btn-primary" onClick={writeBrief} disabled={aiState === "work"}>{aiState === "work" ? "Writing..." : "Write brief"}</button>
             <button data-testid="page:button-save-compare" className="btn" onClick={saveAndCompare}>Save run and compare</button>
           </div>
-          {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
+          {notice && (<div role="status" style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
         </div>)}
         {step === 2 && brief && (<div>
           <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>Role: {ROLES.find(r => r.id === role)?.label} · Place: {place === "all" ? "All places (" + places.length + ")" : place} · {scoped.length} readings</div>
@@ -304,7 +302,7 @@ export default function Studio() {
         {step === 3 && (<div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
             <label style={{ fontSize: 12, color: "#666" }}>Place
-              <select data-testid="page:select-place" value={place} onChange={e => { const v = e.target.value; setPlace(v); setActions(actionsFor(role, v === "all" ? live : live.filter(r => r.location === v))); }} style={{ marginLeft: 6, border: "1px solid #D9D6CF", borderRadius: 4, padding: "6px 8px" }}>
+              <select data-testid="page:select-place" aria-label="Choose place" value={place} onChange={e => { const v = e.target.value; setPlace(v); setActions(actionsFor(role, v === "all" ? live : live.filter(r => r.location === v))); }} style={{ marginLeft: 6, border: "1px solid #D9D6CF", borderRadius: 4, padding: "6px 8px" }}>
                 <option value="all">All places ({places.length})</option>
                 {places.map(pl => (<option key={pl} value={pl}>{pl}</option>))}
               </select>
@@ -321,30 +319,30 @@ export default function Studio() {
             {changeRows.map(r => { const d = r.prev == null ? 0 : (r.cur as number) - (r.prev as number); const up = d > 0; return (<tr key={r.loc} className="zebra"><td>{r.loc}</td><td className="mono">{r.prev == null ? "-" : r.prev}</td><td style={{ color: r.prev == null ? "#999" : up ? "#C62828" : "#2E7D32", fontWeight: 700 }}>{r.prev == null ? "-" : up ? "Up" : "Down"}</td><td className="mono">{r.cur}</td></tr>); })}
           </tbody></table>)}
           <p>{changeText || "Save a run to see the comparison."}</p>
-          <div style={{ marginTop: 8 }}><button data-testid="page:button-make-documents" className="btn btn-primary" onClick={() => go(5)}>Make documents</button></div>
+          <div style={{ marginTop: 8 }}><button data-testid="page:button-make-documents" className="btn btn-primary" onClick={() => { go(5); writeDocument(); }}>Make documents</button></div>
         </div>)}
         {step === 5 && (<div>
           <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>For {ROLES.find(r => r.id === role)?.label} · {place === "all" ? "All places" : place}</div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-            <div>{["internal", "citizen"].map(t => (<button key={t} data-testid="page:button-doc-type" className="btn" style={{ marginRight: 6, ...(docType === t ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setDocType(t); setDocAi(""); setDocAiState("idle"); }}>{t === "internal" ? s.internal : s.citizen}</button>))}</div>
-            <div>{["en", "hi"].map(l => (<button key={l} data-testid="page:button-doc-lang" className="btn" style={{ marginRight: 6, ...(lang === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setLang(l); setDocAi(""); setDocAiState("idle"); }}>{l === "en" ? "English" : "Hindi"}</button>))}</div>
-            <div>{["general", "child", "easy_read"].map(l => (<button key={l} data-testid="page:button-doc-level" className="btn" style={{ marginRight: 6, ...(level === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setLevel(l); setDocAi(""); setDocAiState("idle"); }}>{l}</button>))}</div>
+            <div>{["internal", "citizen"].map(t => (<button key={t} data-testid="page:button-doc-type" className="btn" style={{ marginRight: 6, ...(docType === t ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setDocType(t); writeDocument(t, lang, level); }}>{t === "internal" ? s.internal : s.citizen}</button>))}</div>
+            <div>{["en", "hi"].map(l => (<button key={l} data-testid="page:button-doc-lang" className="btn" style={{ marginRight: 6, ...(lang === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setLang(l); writeDocument(docType, l, level); }}>{l === "en" ? "English" : "Hindi"}</button>))}</div>
+            <div>{["general", "child", "easy_read"].map(l => (<button key={l} data-testid="page:button-doc-level" className="btn" style={{ marginRight: 6, ...(level === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setLevel(l); writeDocument(docType, lang, l); }}>{l}</button>))}</div>
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
             <span className="chip" style={docAiState === "down" ? { borderColor: "#C62828", color: "#C62828" } : {}}>{docAiState === "work" ? "AI writing..." : docAiState === "ok" ? "Written by AI" : docAiState === "down" ? "Template (AI unavailable)" : "Ready"}</span>
-            <button data-testid="page:button-regenerate-doc" className="btn" onClick={writeDocument} disabled={docAiState === "work" || !brief}>Regenerate with AI</button>
+            <button data-testid="page:button-regenerate-doc" className="btn" onClick={() => writeDocument()} disabled={docAiState === "work" || !brief}>Generate with AI</button>
           </div>
           <div className="gov-card" style={{ padding: 24, background: "#fff" }}>
             <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 14 }}>{docAiState === "work" ? "Writing the document with AI..." : (docText || "Write a brief first, then the document appears here.")}</pre>
           </div>
           {docType === "citizen" && brief && (<div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Vulnerable-group sections are present and use the fixed template when the AI service is down.</div>)}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}><button data-testid="page:button-download-doc" className="btn btn-primary" onClick={download}>Download Markdown</button><button data-testid="page:button-print-doc" className="btn" onClick={() => window.print()}>Print / PDF</button></div>
-          {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
+          {notice && (<div role="status" style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
         </div>)}
         {step === 6 && (<div className="gov-card" style={{ padding: 12 }}>
           <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Map {place !== "all" ? "— " + place : place === "all" && rows.length ? "— your uploaded places matched to known stations" : ""}</h3>
-          <p style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>Your uploaded locations are matched by name to known stations and drawn with your values. Unmatched places are listed below the map — add a station or city name to place them.</p>
-          <StationMap userRows={scoped.map(r => ({ location: r.location, value: r.value }))} />
+          <p style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>Only places from your upload with latitude and longitude columns are drawn. Anything without coordinates is listed, never guessed.</p>
+          <StationMap userRows={scoped.map(r => ({ location: r.location, value: r.value, lat: r.lat, lng: r.lng }))} />
         </div>)}
       </main>
     </div>

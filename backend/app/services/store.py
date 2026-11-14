@@ -27,6 +27,14 @@ def put(table, row: dict):
     c.execute(f"INSERT OR REPLACE INTO {table}({cols}) VALUES({qs})", list(row.values()))
     c.commit(); c.close()
 
+def bulk(table, rows: list[dict]):
+    if not rows:
+        return
+    c = conn()
+    cols = ",".join(rows[0].keys()); qs = ",".join("?" for _ in rows[0])
+    c.executemany(f"INSERT OR REPLACE INTO {table}({cols}) VALUES({qs})", [list(r.values()) for r in rows])
+    c.commit(); c.close()
+
 def all_q(sql, args=()):
     c = conn(); r = c.execute(sql, args).fetchall()
     cols = [d[0] for d in c.execute(sql, args).description] if r else []
