@@ -4,18 +4,20 @@ import dynamic from 'next/dynamic';
 import Papa from 'papaparse';
 import { postAnalyze } from '@/lib/backend';
 const StationMap = dynamic(() => import("./components/StationMap"), { ssr: false });
-import { buildRows, metrics, heuristicBrief, actionsFor, buildInternalDoc, buildCitizenDoc, STR, BAND, bandColor, SAMPLE_CSV } from '@/lib/aqi';
+import { buildRows, metrics, heuristicBrief, actionsFor, buildInternalDoc, buildCitizenDoc, STR } from '@/lib/aqi';
 import type { Row, Brief, Action } from '@/lib/aqi';
 
 const STEPS = ["DATA", "QUALITY", "BRIEF", "ACTIONS", "CHANGES", "DOCUMENTS", "MAP"];
-const PIPE = ["uploading","extracting","interpreting","transforming","validating","geospatial","analyzing","insights"];
 const ROLES = [{ id: "ward", label: "Ward Officer" }, { id: "housing", label: "Housing Society" }, { id: "school", label: "School" }];
+const PIPE = ["uploading", "extracting", "interpreting", "transforming", "validating", "geospatial", "analyzing", "insights"];
 
-type ChatMsg = { from: string; text: string };
 type SavedRun = { id: string; time: string; scope: string; mean: number; top: string; rows: Row[] };
+type UpFile = { name: string; size: number };
+
 export default function Studio() {
   const [paste, setPaste] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
+  const [upFiles, setUpFiles] = useState<UpFile[]>([]);
   const [pdfNote, setPdfNote] = useState(false);
   const [imgMsg, setImgMsg] = useState("");
   const [step, setStep] = useState(0);
@@ -33,83 +35,119 @@ export default function Studio() {
   const [docType, setDocType] = useState("internal");
   const [lang, setLang] = useState("en");
   const [level, setLevel] = useState("general");
-  const [chat, setChat] = useState<ChatMsg[]>([{ from: "studio", text: "Paste data or upload a file, then press Confirm and check quality." }]);
-  const [cmd, setCmd] = useState("");
+  const [pipe, setPipe] = useState<string[]>([]);
+  const [maxReached, setMaxReached] = useState(0);
+  function go(n: number) { setStep(n); setMaxReached(m => Math.max(m, n)); }
   const fileRef = useRef<HTMLInputElement>(null);
   const live = useMemo(() => rows.filter(r => !excluded.has(r.id)), [rows, excluded]);
   const m = useMemo(() => metrics(live), [live]);
+
+  function tag(records: Record<string, string>[], source: string) {
+    return records.map(r => ({ ...r, __source: source }));
+  }
+  function reid(all: Row[]) {
+    return all.map((r, i) => ({ ...r, id: "R" + String(i + 1).padStart(4, "0") }));
+  }
   function ingest(records: Record<string, string>[], sourceNote: string) {
-    const built = buildRows(records);
-    setRows(built); setExcluded(new Set()); setBrief(null); setActions([]);
-    setChangeText(""); setChangeRows([]); setStep(0); setAiState("idle"); setNotice("");
-    setChat(c => [...c, { from: "studio", text: "Loaded " + built.length + " readings from " + sourceNote + ". Press Confirm and check quality." }]);
+    const built = reid(buildRows(records));
+    setRows(built); setUpFiles([{ name: sourceNote, size: 0 }]);
+    resetAfter();
+  }
+  function append(records: Record<string, string>[], sourceNote: string) {
+    const merged = [...rows.map(r => r.raw as Record<string, string>), ...tag(records, sourceNote)];
+    const built = reid(buildRows(merged));
+    setRows(built); setUpFiles(f => [...f, { name: sourceNote, size: 0 }]);
+    resetAfter();
+  }
+  function resetAfter() {
+    setExcluded(new Set()); setBrief(null); setActions([]);
+    setChangeText(""); setChangeRows([]); setAiState("idle"); setNotice("");
+  }
+  function removeFile(name: string) {
+    const rest = rows.filter(r => (r.raw as Record<string, string>).__source !== name);
+    setRows(reid(rest.map(r => r.raw as Record<string, string>)));
+    setUpFiles(f => f.filter(x => x.name !== name));
+    resetAfter();
+  }
+  function runPipe() {
+    setPipe([]);
+    PIPE.forEach((s, i) => setTimeout(() => setPipe(p => [...p, s]), 120 * (i + 1)));
+  }
+  async function parseFile(f: File): Promise<{ recs: Record<string, string>[]; note: string }> {
+    const name = f.name.toLowerCase();
+    if (name.endsWith(".csv") || name.endsWith(".tsv") || name.endsWith(".txt")) {
+      const text = await f.text();
+      const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true, delimiter: name.endsWith(".tsv") ? "\t" : undefined as unknown as string });
+      return { recs: tag((parsed.data || []) as Record<string, string>[], f.name), note: f.name };
+    }
+    if (name.endsWith(".json")) {
+      const data = JSON.parse(await f.text());
+      const arr = Array.isArray(data) ? data : (data.rows || data.data || []);
+      return { recs: tag(arr as Record<string, string>[], f.name), note: f.name };
+    }
+    if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+      const XLSX = await import("xlsx");
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const arr = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" });
+      return { recs: tag(arr, f.name + " / " + wb.SheetNames[0]), note: f.name };
+    }
+    if (name.endsWith(".pdf")) {
+      setPdfNote(true);
+      throw new Error("PDF text extraction is best-effort and runs on the server. Paste the table or upload CSV/XLSX for now. Scanned PDFs cannot be read.");
+    }
+    if (/\.(png|jpe?g)$/.test(name)) throw new Error("Cannot read a table from an image. Paste the data or upload a data file.");
+    throw new Error("Unsupported format. Use CSV, TSV, TXT, JSON, XLSX, or paste text.");
+  }
+  async function onFiles(fs: FileList | File[]) {
+    setImgMsg(""); setPdfNote(false); runPipe();
+    const list = [...fs];
+    const first = rows.length === 0;
+    try {
+      const parts = [];
+      for (const f of list) parts.push(await parseFile(f));
+      const all = parts.flatMap(p => p.recs);
+      if (first) ingest(all, parts.map(p => p.note).join(", "));
+      else {
+        const merged = [...rows.map(r => r.raw as Record<string, string>), ...all];
+        setRows(reid(buildRows(merged)));
+        setUpFiles(f => [...f, ...parts.map(p => ({ name: p.note, size: 0 }))]);
+        resetAfter();
+      }
+    } catch (e) { setImgMsg("Could not read file: " + (e as Error).message); }
   }
   function parsePasted() {
     if (!paste.trim()) return;
+    runPipe();
     try {
       const parsed = Papa.parse<Record<string, string>>(paste.trim(), { header: true, skipEmptyLines: true });
-      ingest((parsed.data || []) as Record<string, string>[], "pasted table");
+      const recs = tag((parsed.data || []) as Record<string, string>[], "pasted text");
+      if (rows.length) { setRows(reid(buildRows([...rows.map(r => r.raw as Record<string, string>), ...recs]))); }
+      else ingest(recs, "pasted text");
     } catch (e) { setImgMsg("Could not read the pasted table."); }
   }
   function loadSample() {
-    const parsed = Papa.parse<Record<string, string>>(SAMPLE_CSV, { header: true, skipEmptyLines: true });
-    ingest((parsed.data || []) as Record<string, string>[], "messy sample");
+    import("@/lib/aqi").then(mod => {
+      const parsed = Papa.parse<Record<string, string>>(mod.SAMPLE_CSV, { header: true, skipEmptyLines: true });
+      ingest(tag((parsed.data || []) as Record<string, string>[], "messy sample"), "messy sample");
+    });
   }
   async function loadSnapshot() {
     try {
       const res = await fetch("/aqi-2026-11-14-0100.csv");
       const text = await res.text();
       const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
-      const recs = ((parsed.data || []) as Record<string, string>[]).map((r) => ({
+      const recs = tag(((parsed.data || []) as Record<string, string>[]).map((r) => ({
         location: r.station || r.city || "",
         time: r.last_update || "",
         pollutant: r.pollutant_id || "",
         value: r.pollutant_avg || "",
         unit: "ug/m3",
-      }));
-      ingest(recs, "full snapshot 14-11-2026 01:00 (570 stations)");
-      setStep(0);
+      })), "full snapshot 14-11-2026 01:00");
+      ingest(recs, "full snapshot (570 stations)");
+      go(0);
     } catch (e) { setImgMsg("Could not load the snapshot file."); }
-  }
-  const [pipe, setPipe] = useState<string[]>([]);
-  function runPipe() {
-    setPipe([]);
-    PIPE.forEach((s, i) => setTimeout(() => setPipe(p => [...p, s]), 120 * (i + 1)));
-  }
-  async function onFile(f: File) {
-    setImgMsg(""); setPdfNote(false);
-    const name = f.name.toLowerCase();
-    runPipe();
-    try {
-      if (name.endsWith(".csv") || name.endsWith(".tsv") || name.endsWith(".txt")) {
-        const text = await f.text();
-        const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: text.includes("\t") ? false : true, delimiter: name.endsWith(".tsv") ? "\t" : undefined as unknown as string });
-        ingest((parsed.data || []) as Record<string, string>[], f.name);
-      } else if (name.endsWith(".json")) {
-        const text = await f.text();
-        const data = JSON.parse(text);
-        const arr = Array.isArray(data) ? data : (data.rows || data.data || []);
-        ingest(arr as Record<string, string>[], f.name);
-      } else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
-        const XLSX = await import("xlsx");
-        const buf = await f.arrayBuffer();
-        const wb = XLSX.read(buf, { type: "array" });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        ingest(XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" }), f.name + " sheet " + wb.SheetNames[0]);
-      } else if (name.endsWith(".pdf")) {
-        setPdfNote(true);
-        setImgMsg("PDF text extraction is best-effort. Check the table, then confirm. Scanned/image PDFs cannot be read: paste the data or upload CSV.");
-        const text = await f.text().catch(() => "");
-        if (text.trim()) {
-          const parsed = Papa.parse<Record<string, string>>(text.trim(), { header: true, skipEmptyLines: true });
-          if ((parsed.data || []).length) ingest((parsed.data || []) as Record<string, string>[], f.name);
-        }
-      } else if (/\.(png|jpe?g)$/.test(name)) {
-        setImgMsg("Cannot read table from an image. Paste the data or upload a CSV file.");
-      } else {
-        setImgMsg("Unsupported format. Use CSV, TSV, TXT, JSON, or XLSX.");
-      }
-    } catch (e) { setImgMsg("Could not read that file: " + (e as Error).message); }
   }
   async function writeBrief() {
     if (!live.length) return;
@@ -124,63 +162,41 @@ export default function Studio() {
       setAiState(data.ai ? "ok" : "down");
       if (data.notice) setNotice(data.notice);
       if (!data.ai && !data.notice) setNotice("The AI service is not available. Showing the standard template instead.");
-      setStep(2);
+      go(2);
     } catch (e) {
       setBrief(heuristicBrief(live)); setActions(actionsFor(role, live));
       setAiState("down"); setNotice("The AI service is not available. Showing the standard template instead.");
-      setStep(2);
+      go(2);
     }
   }
   function switchRole(r: string) {
     setRole(r);
     if (live.length) setActions(actionsFor(r, live));
-    setChat(c => [...c, { from: "you", text: "Make this for a " + r }, { from: "studio", text: "Role set to " + r + ". Action list updated." }]);
-    if (step >= 2) setStep(3);
+    if (step >= 2) go(3);
   }
   function saveAndCompare() {
     const scope = [...new Set(live.map(r => r.location))].sort().join(", ");
     let all: SavedRun[] = [];
     try { all = JSON.parse(localStorage.getItem("cas-runs") || "[]"); } catch (e) { all = []; }
-    const prevs = all.filter(r => r.scope === scope);
-    const prev = prevs.slice(-1)[0] || null;
+    const prev = all.filter(r => r.scope === scope).slice(-1)[0] || null;
     const cur = { id: "R" + Date.now(), time: new Date().toISOString(), scope, mean: m.mean, top: m.locMean[0] ? m.locMean[0].loc : "-", rows: live };
-    const curMean = m.mean;
     if (prev) {
-      const prevMap = new Map<string, number>();
-      const pm = metrics(prev.rows);
-      pm.locMean.forEach(l => prevMap.set(l.loc, l.mean));
+      const pm = new Map<string, number>();
+      metrics(prev.rows).locMean.forEach(l => pm.set(l.loc, l.mean));
       const rows2 = m.locMean.map(l => {
-        const pv = prevMap.has(l.loc) ? prevMap.get(l.loc) as number : null;
+        const pv = pm.has(l.loc) ? pm.get(l.loc) as number : null;
         return { loc: l.loc, prev: pv == null ? null : Math.round(pv * 10) / 10, cur: Math.round(l.mean * 10) / 10 };
       });
       setChangeRows(rows2);
       const up = rows2.filter(r => r.prev != null && ((r.cur as number) - (r.prev as number)) / Math.max(1, r.prev as number) >= 0.15);
       const dn = rows2.filter(r => r.prev != null && ((r.prev as number) - (r.cur as number)) / Math.max(1, r.prev as number) >= 0.15);
-      setChangeText("Mean moved from " + prev.mean + " to " + curMean + " ug/m3. " + up.length + " locations rose by 15% or more (" + up.map(r => r.loc).join(", ") + "). " + dn.length + " locations fell by 15% or more (" + dn.map(r => r.loc).join(", ") + "). Worst area is now " + (m.locMean[0] ? m.locMean[0].loc : "-") + ", before it was " + prev.top + ". Unusable readings: " + m.unusable + ".");
+      setChangeText("Mean moved from " + prev.mean + " to " + m.mean + " ug/m3. " + up.length + " locations rose by 15% or more (" + up.map(r => r.loc).join(", ") + "). " + dn.length + " locations fell by 15% or more (" + dn.map(r => r.loc).join(", ") + "). Worst area is now " + (m.locMean[0] ? m.locMean[0].loc : "-") + ", before it was " + prev.top + ". Unusable readings: " + m.unusable + ".");
     } else {
       setChangeRows(m.locMean.map(l => ({ loc: l.loc, prev: null, cur: Math.round(l.mean * 10) / 10 })));
       setChangeText("This is the first brief for this area. No previous brief exists, so there is nothing to compare yet.");
     }
     localStorage.setItem("cas-runs", JSON.stringify([...all, cur].slice(-20)));
-    setStep(4);
-  }
-  function sendCmd() {
-    const t = cmd.toLowerCase(); if (!t.trim()) return;
-    setChat(c => [...c, { from: "you", text: cmd }]);
-    const low = t;
-    if (low.includes("school")) switchRole("school");
-    else if (low.includes("hous")) switchRole("housing");
-    else if (low.includes("ward") || low.includes("officer")) switchRole("ward");
-    if (low.includes("hindi")) { setLang("hi"); setDocType("citizen"); setStep(5); }
-    if (low.includes("english")) setLang("en");
-    if (low.includes("child")) { setLevel("child"); setDocType("citizen"); setStep(5); }
-    if (low.includes("easy")) setLevel("easy_read");
-    if (low.includes("citizen")) { setDocType("citizen"); setStep(5); }
-    if (low.includes("internal")) { setDocType("internal"); setStep(5); }
-    if (low.includes("compar") || low.includes("change") || low.includes("diff")) saveAndCompare();
-    if (low.includes("brief") || low.includes("analy")) writeBrief();
-    if (low.includes("confirm") || low.includes("quality")) setStep(1);
-    setCmd("");
+    go(4);
   }
   const docText = useMemo(() => {
     if (!brief) return "";
@@ -194,113 +210,119 @@ export default function Studio() {
     a.click();
   }
   function cites(f: { cited_row_ids: string[] }, key: string) {
-    return (<span key={key}>{f.cited_row_ids.map(id => (<button key={key + id} className="chip" style={{ marginRight: 4 }} onClick={() => { setFlash(id); setStep(0); setTimeout(() => setFlash(""), 2500); }}>[{id}]</button>))}</span>);
+    return (<span key={key}>{f.cited_row_ids.map(id => (<button key={key + id} data-testid="page:button-cite" className="chip" style={{ marginRight: 4 }} onClick={() => { setFlash(id); go(0); setTimeout(() => setFlash(""), 2500); }}>[{id}]</button>))}</span>);
   }
   const s = STR[lang] || STR.en;
+  const [runCount, setRunCount] = useState(0);
+  useEffect(() => { try { setRunCount(JSON.parse(localStorage.getItem("cas-runs") || "[]").length); } catch (e) { setRunCount(0); } }, []);
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
-      <header style={{ height: 48, background: "#fff", borderBottom: "1px solid #D9D6CF", display: "flex", alignItems: "center", padding: "0 16px", gap: 12 }}>
+      <header data-testid="page:header-app" style={{ height: 52, background: "#fff", borderBottom: "1px solid #D9D6CF", display: "flex", alignItems: "center", padding: "0 16px", gap: 12 }}>
         <strong>Civic Air Quality Briefing Studio</strong>
         <span style={{ color: "#666" }}>Pune Municipal Corporation</span>
         <span style={{ flex: 1 }} />
-        <span className="mono" style={{ fontSize: 12 }}>Run History: {(() => { try { return JSON.parse(localStorage.getItem("cas-runs") || "[]").length; } catch (e) { return 0; } })()} runs</span>
+        <span className="mono" style={{ fontSize: 12 }}>Runs: {runCount}</span>
+        <span className="chip" style={aiState === "down" ? { borderColor: "#C62828", color: "#C62828" } : {}}>{aiState === "down" ? "AI offline" : aiState === "ok" ? "AI online" : "AI standby"}</span>
       </header>
-      {aiState === "down" && (<div style={{ background: "#FFF3CD", borderBottom: "1px solid #D9D6CF", padding: "8px 16px" }}>The AI service is not available. You can see your data and the quality report. <button className="btn" style={{ marginLeft: 8 }} onClick={writeBrief}>Retry</button></div>)}
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        <aside style={{ width: "35%", borderRight: "1px solid #D9D6CF", background: "#fff", display: "flex", flexDirection: "column", minHeight: "calc(100vh - 48px)" }}>
-          <div style={{ padding: 12, borderBottom: "1px solid #D9D6CF" }}>
-            <div onClick={() => fileRef.current && fileRef.current.click()} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 16, textAlign: "center", cursor: "pointer" }}>Drop a file here, or click to browse (CSV, TSV, TXT, JSON, XLSX, PDF text)</div>
-            <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xls,.pdf" style={{ display: "none" }} onChange={e => { const f = e.target.files && e.target.files[0]; if (f) onFile(f); }} />
-            <textarea value={paste} onChange={e => setPaste(e.target.value)} rows={5} placeholder="Or paste the data table here (CSV with header row)..." style={{ width: "100%", marginTop: 8, border: "1px solid #D9D6CF", borderRadius: 4, padding: 8, fontFamily: "monospace", fontSize: 12 }} />
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button className="btn btn-primary" onClick={parsePasted}>Use pasted table</button>
-              <button className="btn" onClick={loadSample}>Load messy sample</button>
-              <button className="btn" onClick={loadSnapshot}>Load full snapshot (570 stations)</button>
+      {aiState === "down" && (<div style={{ background: "#FFF3CD", borderBottom: "1px solid #D9D6CF", padding: "8px 16px" }}>The AI service is not available. Your data and quality report stay on screen. <button data-testid="page:button-retry" className="btn" style={{ marginLeft: 8 }} onClick={writeBrief}>Retry</button></div>)}
+      <nav data-testid="page:nav-steps" style={{ display: "flex", gap: 4, padding: "10px 16px", background: "#F7F6F3", borderBottom: "1px solid #D9D6CF", flexWrap: "wrap" }}>
+        {STEPS.filter((_, i) => i <= maxReached).map((st, i) => (<button key={st} data-testid="page:button-step" onClick={() => go(i)} className="btn" style={i === step ? { borderColor: "#0B5D66", color: "#0B5D66", fontWeight: 700 } : {}}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span> {st}</button>))}
+      </nav>
+      {pipe.length > 0 && (<div style={{ display: "flex", gap: 4, padding: "8px 16px", flexWrap: "wrap", background: "#fff", borderBottom: "1px solid #D9D6CF" }}>{PIPE.map(p => (<span key={p} className="chip" style={pipe.includes(p) ? { borderColor: "#2E7D32", color: "#2E7D32" } : {}}>{p}</span>))}</div>)}
+      <main data-testid="page:main-content" style={{ padding: 16, maxWidth: 1100, width: "100%", margin: "0 auto" }}>
+        {step === 0 && (<div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div className="gov-card" style={{ padding: 16 }}>
+              <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Upload files</h3>
+              <div onClick={() => fileRef.current && fileRef.current.click()} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 24, textAlign: "center", cursor: "pointer" }}>Drop files here, or click to browse<br /><span style={{ fontSize: 12, color: "#666" }}>CSV, TSV, TXT, JSON, XLSX. Several files allowed.</span></div>
+              <input data-testid="page:input-files" ref={fileRef} type="file" multiple accept=".csv,.tsv,.txt,.json,.xlsx,.xls" style={{ display: "none" }} onChange={e => { if (e.target.files && e.target.files.length) onFiles(e.target.files); e.target.value = ""; }} />
+              {upFiles.length > 0 && (<table data-testid="page:table-files" className="gov-table" style={{ marginTop: 12 }}><thead><tr><th>File</th><th></th></tr></thead><tbody>
+                {upFiles.map(f => (<tr key={f.name}><td className="mono">{f.name}</td><td><button data-testid="page:button-remove-file" className="btn" onClick={() => removeFile(f.name)}>Remove</button></td></tr>))}
+              </tbody></table>)}
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button data-testid="page:button-load-sample" className="btn" onClick={loadSample}>Load messy sample</button>
+                <button data-testid="page:button-load-snapshot" className="btn" onClick={loadSnapshot}>Load full snapshot (570 stations)</button>
+              </div>
+              {pdfNote && (<div style={{ marginTop: 8, background: "#FFF3CD", padding: "8px 12px", borderRadius: 4 }}>Source was a PDF. Check the extracted table below before you continue.</div>)}
             </div>
-            {imgMsg && (<div style={{ marginTop: 8, color: "#C62828" }}>{imgMsg}</div>)}
+            <div className="gov-card" style={{ padding: 16 }}>
+              <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Paste text</h3>
+              <textarea data-testid="page:textarea-paste" value={paste} onChange={e => setPaste(e.target.value)} rows={9} placeholder={"location,time,pollutant,value,unit\nShivaji Chowk,2026-11-10 08:00,PM2.5,168,ug/m3"} style={{ width: "100%", border: "1px solid #D9D6CF", borderRadius: 4, padding: 8, fontFamily: "monospace", fontSize: 12 }} />
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button data-testid="page:button-add-paste" className="btn btn-primary" onClick={parsePasted}>Add pasted table</button>
+                <span style={{ fontSize: 12, color: "#666", alignSelf: "center" }}>Empty submissions are rejected. Original files stay unchanged.</span>
+              </div>
+            </div>
           </div>
-          <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
-            {chat.map((msg, i) => (<div key={i} style={{ marginBottom: 8, background: msg.from === "you" ? "#F7F6F3" : "#fff", border: "1px solid #D9D6CF", borderRadius: 4, padding: "6px 8px" }}><strong>{msg.from === "you" ? "You" : "Studio"}: </strong>{msg.text}</div>))}
-          </div>
-          <div style={{ padding: 12, borderTop: "1px solid #D9D6CF", display: "flex", gap: 8 }}>
-            <input value={cmd} onChange={e => setCmd(e.target.value)} onKeyDown={e => { if (e.key === "Enter") sendCmd(); }} placeholder='Try "Make this for a school"' style={{ flex: 1, border: "1px solid #D9D6CF", borderRadius: 4, padding: "6px 8px" }} />
-            <button className="btn btn-primary" onClick={sendCmd}>Send</button>
-          </div>
-        </aside>
-        <main style={{ width: "65%", padding: 16, overflowY: "auto" }}>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
-            {pipe.length > 0 && (<div style={{ display: "flex", gap: 4, marginBottom: 8, flexWrap: "wrap" }}>{PIPE.map(s => (<span key={s} className="chip" style={pipe.includes(s) ? { borderColor: "#2E7D32", color: "#2E7D32" } : {}}>{s}</span>))}</div>)}
-          {STEPS.map((st, i) => (<span key={st} style={{ display: "flex", alignItems: "center", gap: 6 }}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span><button onClick={() => setStep(i)} style={{ fontSize: 12, fontWeight: i === step ? 700 : 400 }}>{st}</button>{i < STEPS.length - 1 && <span style={{ color: "#999" }}>-</span>}</span>))}
-          </div>
-          {step === 0 && (<div className="gov-card" style={{ padding: 0, overflow: "hidden" }}>
-            {pdfNote && (<div style={{ background: "#FFF3CD", padding: "8px 12px", borderBottom: "1px solid #D9D6CF" }}>Source was a PDF. Check the extracted table below before you continue.</div>)}
-            {!rows.length && (<div style={{ padding: 24, color: "#666" }}>No data yet. Paste a table, upload a file, or load the messy sample.</div>)}
-            {rows.length > 0 && (<div style={{ maxHeight: 480, overflow: "auto" }}><table className="gov-table"><thead><tr><th>Row</th><th>Location</th><th>Time</th><th>Pollutant</th><th>Value</th><th>Unit</th><th>Flags</th></tr></thead><tbody>
-              {rows.map(r => (<tr key={r.id} className={"zebra" + (flash === r.id ? " flash" : "")} id={"row-" + r.id}><td className="mono">{r.id}</td><td>{r.location}</td><td>{r.time}</td><td>{r.pollutant}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td>{r.unit}</td><td>{r.flags.length ? r.flags.join(", ") : "-"}</td></tr>))}
+          {imgMsg && (<div style={{ marginTop: 12, color: "#C62828" }}>{imgMsg}</div>)}
+          <div className="gov-card" style={{ padding: 0, overflow: "hidden", marginTop: 12 }}>
+            {!rows.length && (<div style={{ padding: 24, color: "#666" }}>No data yet. Upload a file, paste a table, or load a sample.</div>)}
+            {rows.length > 0 && (<div style={{ maxHeight: 420, overflow: "auto" }}><table data-testid="page:table-preview" className="gov-table"><thead><tr><th>Row</th><th>Location</th><th>Time</th><th>Pollutant</th><th>Value</th><th>Unit</th><th>Source</th><th>Flags</th></tr></thead><tbody>
+              {rows.map(r => (<tr key={r.id} className={"zebra" + (flash === r.id ? " flash" : "")} id={"row-" + r.id}><td className="mono">{r.id}</td><td>{r.location}</td><td>{r.time}</td><td>{r.pollutant}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td>{r.unit}</td><td style={{ fontSize: 11 }}>{String((r.raw as Record<string, string>).__source || "-")}</td><td>{r.flags.length ? r.flags.join(", ") : "-"}</td></tr>))}
             </tbody></table></div>)}
-            {rows.length > 0 && (<div style={{ padding: 12 }}><button className="btn btn-primary" onClick={() => setStep(1)}>Confirm and check quality</button></div>)}
-          </div>)}
-          {step === 1 && (<div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-              {[["Total", m.total, "#1A1A1A"], ["Usable", m.usable, "#2E7D32"], ["Suspect", m.suspect, "#F9A825"], ["Unusable", m.unusable, "#C62828"]].map(([label, n, c]) => (<div key={label as string} className="gov-card" style={{ flex: 1, padding: 12 }}><div style={{ fontSize: 12, color: "#666" }}>{label}</div><div className="mono" style={{ fontSize: 24, color: c as string }}>{n}</div></div>))}
-            </div>
-            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-              {["ALL", "MISSING_VALUE", "NEGATIVE_VALUE", "IMPLAUSIBLE_HIGH", "UNIT_INCONSISTENT", "DUPLICATE_ROW", "STALE_GAP"].map(f => (<button key={f} className="chip" onClick={() => setFlagFilter(f)} style={flagFilter === f ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}}>{f}</button>))}
-            </div>
-            <div className="gov-card" style={{ overflow: "hidden" }}><div style={{ maxHeight: 380, overflow: "auto" }}><table className="gov-table"><thead><tr><th>Row</th><th>Location</th><th>Value</th><th>Flags</th><th>Status</th></tr></thead><tbody>
-              {live.filter(r => flagFilter === "ALL" || r.flags.includes(flagFilter)).map(r => (<tr key={r.id} className="zebra" onClick={() => setDrawer(r)} style={{ cursor: "pointer" }}><td className="mono">{r.id}</td><td>{r.location}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td style={{ fontSize: 11 }}>{r.flags.join(", ") || "-"}</td><td>{r.status}</td></tr>))}
-            </tbody></table></div></div>
-            {drawer && (<div className="gov-card" style={{ marginTop: 8, padding: 12 }}><strong>{drawer.id} - {drawer.location}</strong><div style={{ fontSize: 12, color: "#666" }}>source: {String((drawer.raw as Record<string,string>).__source || "upload")} row {drawer.id} time {drawer.time} pollutant {drawer.pollutant} unit {drawer.unit}</div><div style={{ fontSize: 12, color: "#666" }}>{JSON.stringify(drawer.raw)}</div><div style={{ marginTop: 8 }}><button className="btn" onClick={() => { setExcluded(new Set([...excluded, drawer.id])); setDrawer(null); }}>Exclude this row</button><button className="btn" style={{ marginLeft: 8 }} onClick={() => setDrawer(null)}>Close</button></div></div>)}
-            <div className="gov-card" style={{ padding: 12, marginTop: 8 }}>
-              <strong>Quality dimensions</strong>
-              <div style={{ fontSize: 12, color: "#666" }}>Completeness {m.total ? Math.round((m.total - live.filter(r => r.value == null).length) / Math.max(1, m.total) * 100) : 0}% (missing excluded, never zero) | Validity {m.total ? Math.round(m.usable / Math.max(1, m.total) * 100) : 0}% usable | Consistency {live.some(r => r.flags.includes("UNIT_INCONSISTENT")) ? "mixed units, confirm before comparing" : "units consistent"} | Traceability every finding links to Row IDs | Timeliness check reading dates before trend claims. No single % proves sensor accuracy.</div>
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button className="btn btn-primary" onClick={writeBrief} disabled={aiState === "work"}>{aiState === "work" ? "Writing..." : "Write brief"}</button>
-              <button className="btn" onClick={saveAndCompare}>Save run and compare</button>
-            </div>
-            {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
-          </div>)}
-          {step === 2 && brief && (<div>
-            {[{ t: "Trends", L: brief.trends }, { t: "Hotspots", L: brief.hotspots }, { t: "Data Gaps", L: brief.gaps }].map(sec => (<div key={sec.t} style={{ marginBottom: 12 }}><h3 style={{ fontWeight: 700, marginBottom: 6 }}>{sec.t}</h3>{sec.L.map((f, i) => (<div key={i} className="gov-card" style={{ padding: 10, marginBottom: 6 }}><div>{f.text}</div><div style={{ marginTop: 6 }}>{cites(f, sec.t + i)}</div></div>))}</div>))}
-            <div style={{ fontSize: 12, color: "#666" }}>generated_by: {brief.generated_by}</div>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}><button className="btn btn-primary" onClick={() => setStep(3)}>See actions</button></div>
-          </div>)}
-          {step === 3 && (<div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-              {ROLES.map(r => (<button key={r.id} className="btn" style={role === r.id ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}} onClick={() => switchRole(r.id)}>{r.label}</button>))}
-            </div>
-            {actions.map((a, i) => (<div key={i} className="gov-card" style={{ padding: 10, marginBottom: 6, display: "flex", gap: 10 }}><div style={{ width: 14, borderRadius: 2, background: a.rank === 1 ? "#0B5D66" : a.rank === 2 ? "#EF6C00" : "#999" }} /><div><div>Priority {a.rank}: {a.text}</div><div style={{ marginTop: 6 }}>{cites(a, "a" + i)}</div></div></div>))}
-            <div style={{ marginTop: 8 }}><button className="btn btn-primary" onClick={saveAndCompare}>Save run and compare</button></div>
-          </div>)}
-          {step === 4 && (<div className="gov-card" style={{ padding: 12 }}>
-            <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Previous vs This Brief</h3>
-            {changeRows.length > 0 && (<table className="gov-table" style={{ marginBottom: 12 }}><thead><tr><th>Location</th><th>Previous</th><th></th><th>This brief</th></tr></thead><tbody>
-              {changeRows.map(r => { const d = r.prev == null ? 0 : (r.cur as number) - (r.prev as number); const up = d > 0; return (<tr key={r.loc} className="zebra"><td>{r.loc}</td><td className="mono">{r.prev == null ? "-" : r.prev}</td><td style={{ color: r.prev == null ? "#999" : up ? "#C62828" : "#2E7D32", fontWeight: 700 }}>{r.prev == null ? "-" : up ? "Up" : "Down"}</td><td className="mono">{r.cur}</td></tr>); })}
-            </tbody></table>)}
-            <p>{changeText || "Save a run to see the comparison."}</p>
-            <div style={{ marginTop: 8 }}><button className="btn btn-primary" onClick={() => setStep(5)}>Make documents</button></div>
-          </div>)}
-          {step === 5 && (<div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-              <div>{["internal", "citizen"].map(t => (<button key={t} className="btn" style={{ marginRight: 6, ...(docType === t ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setDocType(t)}>{t === "internal" ? s.internal : s.citizen}</button>))}</div>
-              <div>{["en", "hi"].map(l => (<button key={l} className="btn" style={{ marginRight: 6, ...(lang === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setLang(l)}>{l === "en" ? "English" : "Hindi"}</button>))}</div>
-              <div>{["general", "child", "easy_read"].map(l => (<button key={l} className="btn" style={{ marginRight: 6, ...(level === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setLevel(l)}>{l}</button>))}</div>
-            </div>
-            <div className="gov-card" style={{ padding: 24, background: "#fff" }}>
-              <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 14 }}>{docText || "Write a brief first, then the document appears here."}</pre>
-            </div>
-            {docType === "citizen" && brief && (<div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Vulnerable-group sections are present and use the fixed template when the AI service is down.</div>)}
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}><button className="btn btn-primary" onClick={download}>Download Markdown</button><button className="btn" onClick={() => window.print()}>Print / PDF</button></div>
-            {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
-          </div>)}
-          {step === 6 && (<div className="gov-card" style={{ padding: 12 }}>
-            <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Station map - all places in the CSV snapshot</h3>
-            <p style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>570 stations from resource/aqi-2026-11-14-0100.csv. Circle color shows PM2.5 avg. Click a dot for city, station, and values.</p>
-            <StationMap highlight={[...new Set(live.map(r => r.location))]} />
-          </div>)}
-        </main>
-      </div>
+            {rows.length > 0 && (<div style={{ padding: 12 }}><button data-testid="page:button-confirm-quality" className="btn btn-primary" onClick={() => go(1)}>Confirm and check quality</button></div>)}
+          </div>
+        </div>)}
+        {step === 1 && (<div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            {[["Total", m.total, "#1A1A1A"], ["Usable", m.usable, "#2E7D32"], ["Suspect", m.suspect, "#F9A825"], ["Unusable", m.unusable, "#C62828"]].map(([label, n, c]) => (<div key={label as string} className="gov-card" style={{ flex: 1, padding: 12 }}><div style={{ fontSize: 12, color: "#666" }}>{label}</div><div className="mono" style={{ fontSize: 24, color: c as string }}>{n}</div></div>))}
+          </div>
+          <div className="gov-card" style={{ padding: 12, marginBottom: 12 }}>
+            <strong>Quality dimensions</strong>
+            <div style={{ fontSize: 12, color: "#666" }}>Completeness {m.total ? Math.round((m.total - live.filter(r => r.value == null).length) / Math.max(1, m.total) * 100) : 0}% (missing excluded, never zero) | Validity {m.total ? Math.round(m.usable / Math.max(1, m.total) * 100) : 0}% usable | Consistency {live.some(r => r.flags.includes("UNIT_INCONSISTENT")) ? "mixed units, confirm before comparing" : "units consistent"} | Traceability every finding links to Row IDs | Timeliness check reading dates before trend claims. No single % proves sensor accuracy.</div>
+          </div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+            {["ALL", "MISSING_VALUE", "NEGATIVE_VALUE", "IMPLAUSIBLE_HIGH", "UNIT_INCONSISTENT", "DUPLICATE_ROW", "STALE_GAP"].map(f => (<button key={f} data-testid="page:button-flag" className="chip" onClick={() => setFlagFilter(f)} style={flagFilter === f ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}}>{f}</button>))}
+          </div>
+          <div className="gov-card" style={{ overflow: "hidden" }}><div style={{ maxHeight: 380, overflow: "auto" }}><table data-testid="page:table-quality" className="gov-table"><thead><tr><th>Row</th><th>Location</th><th>Value</th><th>Flags</th><th>Status</th></tr></thead><tbody>
+            {live.filter(r => flagFilter === "ALL" || r.flags.includes(flagFilter)).map(r => (<tr key={r.id} className="zebra" onClick={() => setDrawer(r)} style={{ cursor: "pointer" }}><td className="mono">{r.id}</td><td>{r.location}</td><td className="mono">{r.value == null || Number.isNaN(r.value) ? "-" : r.value}</td><td style={{ fontSize: 11 }}>{r.flags.join(", ") || "-"}</td><td>{r.status}</td></tr>))}
+          </tbody></table></div></div>
+          {drawer && (<div className="gov-card" style={{ marginTop: 8, padding: 12 }}><strong>{drawer.id} - {drawer.location}</strong><div style={{ fontSize: 12, color: "#666" }}>source: {String((drawer.raw as Record<string, string>).__source || "upload")} row {drawer.id} time {drawer.time} pollutant {drawer.pollutant} unit {drawer.unit}</div><div style={{ fontSize: 12, color: "#666" }}>{JSON.stringify(drawer.raw)}</div><div style={{ marginTop: 8 }}><button data-testid="page:button-exclude-row" className="btn" onClick={() => { setExcluded(new Set([...excluded, drawer.id])); setDrawer(null); }}>Exclude this row</button><button className="btn" data-testid="page:button-close-drawer" style={{ marginLeft: 8 }} onClick={() => setDrawer(null)}>Close</button></div></div>)}
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button data-testid="page:button-write-brief" className="btn btn-primary" onClick={writeBrief} disabled={aiState === "work"}>{aiState === "work" ? "Writing..." : "Write brief"}</button>
+            <button data-testid="page:button-save-compare" className="btn" onClick={saveAndCompare}>Save run and compare</button>
+          </div>
+          {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
+        </div>)}
+        {step === 2 && brief && (<div>
+          {[{ t: "Trends", L: brief.trends }, { t: "Hotspots", L: brief.hotspots }, { t: "Data Gaps", L: brief.gaps }].map(sec => (<div key={sec.t} style={{ marginBottom: 12 }}><h3 style={{ fontWeight: 700, marginBottom: 6 }}>{sec.t}</h3>{sec.L.map((f, i) => (<div key={i} className="gov-card" style={{ padding: 10, marginBottom: 6 }}><div>{f.text}</div><div style={{ marginTop: 6 }}>{cites(f, sec.t + i)}</div></div>))}</div>))}
+          <div style={{ fontSize: 12, color: "#666" }}>generated_by: {brief.generated_by}</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}><button data-testid="page:button-see-actions" className="btn btn-primary" onClick={() => go(3)}>See actions</button></div>
+        </div>)}
+        {step === 3 && (<div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            {ROLES.map(r => (<button key={r.id} data-testid="page:button-role" className="btn" style={role === r.id ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}} onClick={() => switchRole(r.id)}>{r.label}</button>))}
+          </div>
+          {actions.map((a, i) => (<div key={i} className="gov-card" style={{ padding: 10, marginBottom: 6, display: "flex", gap: 10 }}><div style={{ width: 14, borderRadius: 2, background: a.rank === 1 ? "#0B5D66" : a.rank === 2 ? "#EF6C00" : "#999" }} /><div><div>Priority {a.rank}: {a.text}</div><div style={{ marginTop: 6 }}>{cites(a, "a" + i)}</div></div></div>))}
+          <div style={{ marginTop: 8 }}><button data-testid="page:button-save-compare-actions" className="btn btn-primary" onClick={saveAndCompare}>Save run and compare</button></div>
+        </div>)}
+        {step === 4 && (<div className="gov-card" style={{ padding: 12 }}>
+          <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Previous vs This Brief</h3>
+          {changeRows.length > 0 && (<table data-testid="page:table-comparison" className="gov-table" style={{ marginBottom: 12 }}><thead><tr><th>Location</th><th>Previous</th><th></th><th>This brief</th></tr></thead><tbody>
+            {changeRows.map(r => { const d = r.prev == null ? 0 : (r.cur as number) - (r.prev as number); const up = d > 0; return (<tr key={r.loc} className="zebra"><td>{r.loc}</td><td className="mono">{r.prev == null ? "-" : r.prev}</td><td style={{ color: r.prev == null ? "#999" : up ? "#C62828" : "#2E7D32", fontWeight: 700 }}>{r.prev == null ? "-" : up ? "Up" : "Down"}</td><td className="mono">{r.cur}</td></tr>); })}
+          </tbody></table>)}
+          <p>{changeText || "Save a run to see the comparison."}</p>
+          <div style={{ marginTop: 8 }}><button data-testid="page:button-make-documents" className="btn btn-primary" onClick={() => go(5)}>Make documents</button></div>
+        </div>)}
+        {step === 5 && (<div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <div>{["internal", "citizen"].map(t => (<button key={t} data-testid="page:button-doc-type" className="btn" style={{ marginRight: 6, ...(docType === t ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setDocType(t)}>{t === "internal" ? s.internal : s.citizen}</button>))}</div>
+            <div>{["en", "hi"].map(l => (<button key={l} data-testid="page:button-doc-lang" className="btn" style={{ marginRight: 6, ...(lang === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setLang(l)}>{l === "en" ? "English" : "Hindi"}</button>))}</div>
+            <div>{["general", "child", "easy_read"].map(l => (<button key={l} data-testid="page:button-doc-level" className="btn" style={{ marginRight: 6, ...(level === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setLevel(l)}>{l}</button>))}</div>
+          </div>
+          <div className="gov-card" style={{ padding: 24, background: "#fff" }}>
+            <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 14 }}>{docText || "Write a brief first, then the document appears here."}</pre>
+          </div>
+          {docType === "citizen" && brief && (<div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Vulnerable-group sections are present and use the fixed template when the AI service is down.</div>)}
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}><button data-testid="page:button-download-doc" className="btn btn-primary" onClick={download}>Download Markdown</button><button data-testid="page:button-print-doc" className="btn" onClick={() => window.print()}>Print / PDF</button></div>
+          {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
+        </div>)}
+        {step === 6 && (<div className="gov-card" style={{ padding: 12 }}>
+          <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Station map - all places in the CSV snapshot</h3>
+          <p style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>570 stations from resource/aqi-2026-11-14-0100.csv. Circle color shows PM2.5 avg. Click a dot for city, station, and values.</p>
+          <StationMap highlight={[...new Set(live.map(r => r.location))]} />
+        </div>)}
+      </main>
     </div>
   );
 }

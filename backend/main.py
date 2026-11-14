@@ -193,8 +193,18 @@ def opencode_run(model: str, prompt: str) -> str:
     return text
 
 
+def llm_text(prompt: str, *, kind: str) -> tuple[str, str]:
+    """Adaption gateway first, opencode CLI as fallback. Returns (text, label)."""
+    try:
+        from app.services.ai import complete, model_for
+        return complete(prompt, kind=kind), "adaption:" + model_for(kind)
+    except Exception:
+        pass
+    return opencode_run(ai_conf()["analyst" if kind == "analyst" else "writer"], prompt), "opencode:" + ai_conf()["analyst" if kind == "analyst" else "writer"]
+
+
 def analyst_call(prompt: str) -> dict:
-    raw = opencode_run(ai_conf()["analyst"], prompt + " Reply with JSON only, no code fences.")
+    raw, _ = llm_text(prompt + " Reply with JSON only, no code fences.", kind="analyst")
     data = json.loads(strip_fences(raw))
     trends = [Finding(**f) for f in data.get("trends", [])]
     hotspots = [Finding(**f) for f in data.get("hotspots", [])]
@@ -205,7 +215,8 @@ def analyst_call(prompt: str) -> dict:
 
 
 def writer_call(prompt: str) -> str:
-    return opencode_run(ai_conf()["writer"], prompt)
+    raw, _ = llm_text(prompt, kind="writer")
+    return raw
 
 
 def clean_findings(items: list[dict], valid: set) -> list[dict]:
@@ -244,11 +255,13 @@ def analyze(body: AnalyzeBody):
         change = ""
         if body.prev:
             change = writer_call("In 150 words explain these calculated changes for a ward officer: " + json.dumps(body.changes or {}))
+        from app.services.ai import model_for as _mf
+        _key = (os.getenv("ADAPTION_API_KEY") or os.getenv("ADPAPI"))
         brief = {
             "trends": clean_findings(a["trends"], valid),
             "hotspots": clean_findings(a["hotspots"], valid),
             "gaps": clean_findings(a["gaps"], valid),
-            "generated_by": "analyst:" + ai_conf()["analyst"],
+            "generated_by": ("adaption:" if _key else "opencode:") + _mf("analyst"),
         }
         if not brief["trends"]:
             brief["trends"] = fb["trends"]

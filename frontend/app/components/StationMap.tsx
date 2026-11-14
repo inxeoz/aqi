@@ -108,16 +108,16 @@ export default function StationMap({ highlight = [] as string[] }) {
     <div>
       <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
         {["ALL", "POOR+", "SEVERE", "MISSING"].map((f) => (
-          <button key={f} className="chip" onClick={() => setFilter(f)}
+          <button key={f} data-testid="StationMap:button-filter" className="chip" onClick={() => setFilter(f)}
             style={filter === f ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}}>{f}</button>
         ))}
-        <button className="chip" onClick={() => setShowEffect((v) => !v)}
+        <button data-testid="StationMap:button-toggle-effect" className="chip" onClick={() => setShowEffect((v) => !v)}
           style={showEffect ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}}>
           {showEffect ? "Hide effect area" : "Show effect area"}
         </button>
         <label style={{ fontSize: 12, color: "#666", display: "flex", gap: 6, alignItems: "center" }}>
           Base radius
-          <input type="range" min={1} max={20} step={1} value={baseKm}
+          <input data-testid="StationMap:input-base-radius" type="range" min={1} max={20} step={1} value={baseKm}
             onChange={(e) => setBaseKm(Number(e.target.value))} style={{ width: 110 }} />
           <span className="mono">{baseKm} km</span>
         </label>

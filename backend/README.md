@@ -19,7 +19,12 @@ Notes:
 - POST /api/analyze {rows, role, prev, changes} -> {brief, actions, change, ai, notice?}
 
 The frontend calls this URL via NEXT_PUBLIC_BACKEND_URL.
-Code computes all numbers. AI (opencode runner) only writes text.
+Code computes all numbers. AI only writes text.
+
+## AI gateway: Adaption (ADPAPI)
+- Analyst + writer calls go through `app/services/ai.py` -> Adaption `POST /api/v1/responses` (SDK `adaption`).
+- Set `ADAPTION_API_KEY` in `backend/.env` (never commit it). Optional: `ANALYST_MODEL`, `WRITER_MODEL`, `ADAPTION_MODEL` (default `qwen3.5-397b`), `ADAPTION_BASE_URL`.
+- Without a key, the backend falls back to the `opencode run` CLI; without either, it serves the heuristic template with a yellow banner.
 
 ## New: versioned API /api/v1 (new-spec section 5)
 Modular services in `app/services/` (ingestion, extraction, transformation, validation,

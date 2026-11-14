@@ -7,7 +7,7 @@ The app turns raw air tables into local actions. It flags bad data. It writes sh
 
 ## 2. Approach and logic
 - Code computes all numbers. AI only writes text.
-- Chat + Canvas layout. Left side is input and chat. Right side shows data, quality, brief, actions, changes, documents, map.
+- Application layout. Top step bar moves through DATA, QUALITY, BRIEF, ACTIONS, CHANGES, DOCUMENTS, MAP. The DATA step has two input panels: file upload and pasted text. No chat box.
 - Degraded state: if AI fails, tables and metrics stay on screen with a yellow banner. Heuristic brief takes over.
 - Traceability: every finding has `cited_row_ids`. Code checks each ID. Bad IDs are removed.
 
@@ -41,7 +41,7 @@ npm run dev
 Open http://localhost:3000.
 
 **Stop:** press `Ctrl+C` in each terminal.
-1. DATA (CSV only): paste a CSV table, upload a .csv file, load messy sample, or press Load full snapshot (570 stations). App assigns Row IDs like R0001. Accepted: CSV, TSV, TXT, JSON, XLSX (sheet 1), pasted tables; PDF text is best-effort with user confirm; scanned/image PDFs and JPG/PNG are refused with a message. Backend mirrors this in POST /api/v1/analyses/{id}/files + /text.
+1. DATA: paste a table, upload one or more files, load the messy sample, or press Load full snapshot (570 stations). App assigns Row IDs like R0001. Each file can be removed individually. Accepted: CSV, TSV, TXT, JSON, XLSX (sheet 1), pasted tables; PDF text is best-effort with user confirm; scanned/image PDFs and JPG/PNG are refused with a message. Backend mirrors this in POST /api/v1/analyses/{id}/files + /text.
 2. QUALITY: counts Usable / Suspect / Unusable. Flags: MISSING_VALUE, NEGATIVE_VALUE, IMPLAUSIBLE_HIGH, UNIT_INCONSISTENT, DUPLICATE_ROW, STALE_GAP. Click a row for detail. Exclude rows if needed.
 3. BRIEF: press Write brief. Analyst model returns trends, hotspots, gaps as JSON. Click [R0001] to jump to the source row.
 4. ACTIONS: switch role. Each role gets 5 actions from a fixed catalog with priority 1-3.
@@ -67,7 +67,7 @@ Open http://localhost:3000.
 - AI route now runs through the `opencode run` CLI instead of direct OpenAI HTTP. Model names come from env, with free-tier defaults.
 
 ## 6. Gen AI services utilized
-- Runner: `opencode run --model <name> --format json` from `backend/main.py` (`POST /api/analyze`). The old Next.js route is removed; the frontend calls the backend through `frontend/lib/backend.ts`.
+- Runner: Adaption gateway (`app/services/ai.py`, SDK `adaption`, `POST /api/v1/responses`) from `backend/main.py` (`POST /api/analyze`). Set `ADAPTION_API_KEY` in `backend/.env`. Falls back to `opencode run --model <name> --format json` when no key is set, then to the heuristic template. The old Next.js route is removed; the frontend calls the backend through `frontend/lib/backend.ts`.
 - Analyst model (env `ANALYST_MODEL`, fallback `AI_MODEL`, default `opencode-go/beam-free#low`): reads only calculated metrics (mean, location means, worst IDs) plus a sample of flagged rows. Returns strict JSON validated by Zod: trends, hotspots, gaps, each with text and cited_row_ids. Used in the BRIEF step.
 - Writer model (env `WRITER_MODEL`, fallback `AI_MODEL`, default `opencode-go/beam-free#low`): writes the 150-word change summary for a ward officer in the CHANGES step. Used only for wording, not numbers.
 - Where AI is NOT used: means, ranks, bands, flags, effect radius, document structure, vulnerable-group fixed templates. All computed in `lib/aqi.ts`.
