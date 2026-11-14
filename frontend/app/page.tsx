@@ -241,7 +241,7 @@ export default function Studio() {
       </header>
       {aiState === "down" && (<div style={{ background: "#FFF3CD", borderBottom: "1px solid #D9D6CF", padding: "8px 16px" }}>The AI service is not available. Your data and quality report stay on screen. <button data-testid="page:button-retry" className="btn" style={{ marginLeft: 8 }} onClick={writeBrief}>Retry</button></div>)}
       <nav data-testid="page:nav-steps" style={{ display: "flex", gap: 4, padding: "10px 16px", background: "#F7F6F3", borderBottom: "1px solid #D9D6CF", flexWrap: "wrap" }}>
-        {STEPS.filter((_, i) => i <= maxReached).map((st, i) => (<button key={st} data-testid="page:button-step" onClick={() => go(i)} className="btn" style={i === step ? { borderColor: "#0B5D66", color: "#0B5D66", fontWeight: 700 } : {}}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span> {st}</button>))}
+        {STEPS.filter((st, i) => i <= maxReached || st === "MAP").map((st, i) => (<button key={st} data-testid="page:button-step" onClick={() => go(STEPS.indexOf(st))} className="btn" style={i === step ? { borderColor: "#0B5D66", color: "#0B5D66", fontWeight: 700 } : {}}><span className={"stepdot" + (i <= step ? " on" : "")}>{i + 1}</span> {st}</button>))}
       </nav>
       {pipe.length > 0 && (<div style={{ display: "flex", gap: 4, padding: "8px 16px", flexWrap: "wrap", background: "#fff", borderBottom: "1px solid #D9D6CF" }}>{PIPE.map(p => (<span key={p} className="chip" style={pipe.includes(p) ? { borderColor: "#2E7D32", color: "#2E7D32" } : {}}>{p}</span>))}</div>)}
       <main data-testid="page:main-content" style={{ padding: 16, maxWidth: 1100, width: "100%", margin: "0 auto" }}>
@@ -342,9 +342,9 @@ export default function Studio() {
           {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
         </div>)}
         {step === 6 && (<div className="gov-card" style={{ padding: 12 }}>
-          <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Station map - all places in the CSV snapshot</h3>
-          <p style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>570 stations from resource/aqi-2026-11-14-0100.csv. Circle color shows PM2.5 avg. Click a dot for city, station, and values.</p>
-          <StationMap highlight={[...new Set(live.map(r => r.location))]} />
+          <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Map {place !== "all" ? "— " + place : place === "all" && rows.length ? "— your uploaded places matched to known stations" : ""}</h3>
+          <p style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>Your uploaded locations are matched by name to known stations and drawn with your values. Unmatched places are listed below the map — add a station or city name to place them.</p>
+          <StationMap userRows={scoped.map(r => ({ location: r.location, value: r.value }))} />
         </div>)}
       </main>
     </div>

@@ -19,7 +19,10 @@ function factor(pm: number | null) {
   return 3;
 }
 
-export default function StationMap({ highlight = [] as string[] }) {
+type UserRow = { location: string; value: number | null };
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+export default function StationMap({ userRows = [] as UserRow[] }) {
   const [stations, setStations] = useState<St[]>([]);
   const [filter, setFilter] = useState("ALL");
   const [showEffect, setShowEffect] = useState(true);
@@ -27,8 +30,20 @@ export default function StationMap({ highlight = [] as string[] }) {
   const divRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const layerRef = useRef<import("leaflet").LayerGroup | null>(null);
-  const hlRef = useRef<string[]>(highlight);
-  hlRef.current = highlight;
+  // match uploaded locations to known stations by station/city name
+  const matched = useRef(new Map<string, St>());
+  const unmatched = [...new Set(userRows.map(r => r.location))].filter(loc => {
+    const n = norm(loc);
+    const hit = stations.find(s => norm(s.station) === n || norm(s.station).includes(n) || norm(s.city) === n);
+    if (hit) matched.current.set(loc, hit);
+    else matched.current.delete(loc);
+    return !hit;
+  });
+  const userVals = new Map<string, number[]>();
+  userRows.forEach(r => { if (r.value != null && matched.current.has(r.location)) userVals.set(r.location, [...(userVals.get(r.location) || []), r.value]); });
+  const userAvg = new Map<string, number>([...userVals.entries()].map(([k, vs]) => [k, vs.reduce((a, b) => a + b, 0) / vs.length]));
+  const hlRef = useRef<string[]>([...matched.current.keys()]);
+  hlRef.current = [...matched.current.keys()];
 
   useEffect(() => {
     fetch("/stations.json").then((r) => r.json()).then(setStations).catch(() => setStations([]));
@@ -96,8 +111,12 @@ export default function StationMap({ highlight = [] as string[] }) {
         fillColor: color(s.pm25),
         fillOpacity: 0.9,
       }).addTo(layer);
+      const upLoc = [...matched.current.entries()].find(([, st]) => st.station === s.station)?.[0];
+      const upAvg = upLoc != null ? userAvg.get(upLoc) : undefined;
       c.bindPopup(
-        `<strong>${s.city}</strong><br/>${s.station}<br/>PM2.5: ${s.pm25 ?? "-"} | PM10: ${s.pm10 ?? "-"}<br/>effect radius: ${(baseKm * factor(s.pm25)).toFixed(1)} km<br/>${s.state}`
+        `<strong>${s.city}</strong><br/>${s.station}<br/>` +
+        (upAvg != null ? `<strong>Your reading: ${upAvg.toFixed(0)} ug/m3 (${upLoc})</strong><br/>` : "") +
+        `PM2.5: ${s.pm25 ?? "-"} | PM10: ${s.pm10 ?? "-"}<br/>effect radius: ${(baseKm * factor(s.pm25)).toFixed(1)} km<br/>${s.state}`
       );
       bounds.push([s.lat, s.lng]);
     });
@@ -134,6 +153,12 @@ export default function StationMap({ highlight = [] as string[] }) {
       <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
         Effect radius = base radius x severity factor. Example at {baseKm} km base: severe = {(baseKm * 3).toFixed(0)} km, poor = {(baseKm * 2).toFixed(0)} km.
       </div>
+      {userRows.length > 0 && (
+        <div style={{ fontSize: 12, marginTop: 8 }}>
+          {matched.current.size > 0 && (<div style={{ color: "#2E7D32" }}>Matched {matched.current.size} uploaded place(s): {[...matched.current.keys()].join(", ")}</div>)}
+          {unmatched.length > 0 && (<div style={{ color: "#C62828" }}>Could not place {unmatched.length} uploaded location(s): {unmatched.join(", ")}. Use a station or city name to map them.</div>)}
+        </div>
+      )}
     </div>
   );
 }
