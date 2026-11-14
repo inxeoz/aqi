@@ -165,13 +165,11 @@ export function buildCitizenDoc(rows: Row[], brief: Brief, actions: Action[], la
   const m = metrics(rows);
   const top = m.locMean[0];
   const out: string[] = [];
+  const word = top ? BAND(top.mean).toLowerCase() : "";
   out.push("# " + s.citizen);
   out.push("");
   out.push("## " + s.quality);
-  out.push(L1(top ? ("Air in " + top.loc + " is " + BAND(top.mean) + " at " + Math.round(top.mean) + " ug/m3.") : "No valid air readings today."));
-  out.push("");
-  out.push("## " + s.actions);
-  actions.slice(0, 4).forEach(a => out.push("- " + L1(a.text)));
+  out.push(L1(top ? ("Air in " + top.loc + " is " + word + " today. " + (m.mean > 200 ? "Avoid going out if you can." : m.mean > 100 ? "Limit time outside, above all in the morning and evening." : "You can go out as usual, but check again tomorrow.")) : "We have no valid air readings today, so please be careful outside."));
   out.push("");
   out.push("## " + s.children);
   out.push(L1(vulnSection("child", lang)));

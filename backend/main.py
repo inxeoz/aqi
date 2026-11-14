@@ -233,6 +233,58 @@ def health():
     return {"ok": True}
 
 
+class DocBody(BaseModel):
+    brief: dict[str, Any] = Field(default_factory=dict)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    changeText: str = ""
+    kind: str = "internal"
+    lang: str = "en"
+    level: str = "general"
+    role: str = "ward"
+    place: str = "all"
+
+
+PLAIN = (" Write in plain human language: short sentences, everyday words, no unexplained jargon. "
+         "Keep the [RID] citation markers exactly as given so every claim stays traceable.")
+DOC_GUIDE = {
+    "internal": ("Write an Internal Briefing Note for a busy ward officer: executive summary in plain words first, then analysis period, data sources, data quality, pollution trends, hotspots, comparison with previous brief, priority recommendations with owners, evidence and limitations. Clear and direct, evidence-based, action-oriented."),
+    "citizen": ("Write a Citizen Advisory a 12-year-old can understand. Rules: short everyday words, no jargon, no chemical names without a plain word first, no raw numbers or units in the body text (say poor, very dusty, worst in the morning instead of values), one idea per sentence. Sections: current situation in plain words, affected areas, what citizens should do, outdoor activity guidance, and mandatory separate sections for CHILDREN, OLDER ADULTS, and SENSITIVE PEOPLE, plus source and publication date. Simple, safety-oriented, never diagnose or prescribe medication."),
+}
+
+
+@app.post("/api/document")
+def document(body: DocBody):
+    valid = set()
+    for sec in ("trends", "hotspots", "gaps"):
+        for f in (body.brief.get(sec) or []):
+            valid.update(f.get("cited_row_ids", []))
+    for a in body.actions:
+        valid.update(a.get("cited_row_ids", []))
+    level_note = {"general": "standard adult reading level",
+                  "child": "very short simple sentences a 10-year-old understands",
+                  "easy_read": "one short sentence per line, simplest words"}.get(body.level, "standard adult reading level")
+    lang_note = "Write entirely in Hindi (Devanagari script)." if body.lang == "hi" else "Write entirely in English."
+    prompt = (
+        "You write air-quality documents for a civic studio. " + lang_note + " Reading level: " + level_note + ".\n"
+        + DOC_GUIDE.get(body.kind, DOC_GUIDE["internal"]) + "\n"
+        + "Role: " + body.role + ". Place: " + body.place + ".\n"
+        + "Use ONLY these findings and actions; do not invent numbers or places. "
+          "Keep every [RID] citation marker exactly as given." + PLAIN + " \n"
+        + "BRIEF: " + json.dumps(body.brief) + "\n"
+        + "ACTIONS: " + json.dumps(body.actions) + "\n"
+        + "CHANGES: " + body.changeText
+    )
+    try:
+        text = writer_call(prompt)
+        import re as _re
+        def _fix(m):
+            return m.group(0) if m.group(1) in valid else ""
+        text = _re.sub(r"\[((?:R\d{4}))\]", _fix, text)
+        return {"text": text.strip(), "ai": True}
+    except Exception:
+        return {"text": "", "ai": False}
+
+
 @app.post("/api/analyze")
 def analyze(body: AnalyzeBody):
     rows = body.rows

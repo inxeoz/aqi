@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Papa from 'papaparse';
-import { postAnalyze } from '@/lib/backend';
+import { postAnalyze, postDocument } from '@/lib/backend';
 const StationMap = dynamic(() => import("./components/StationMap"), { ssr: false });
 import { buildRows, metrics, heuristicBrief, actionsFor, buildInternalDoc, buildCitizenDoc, STR } from '@/lib/aqi';
 import type { Row, Brief, Action } from '@/lib/aqi';
@@ -33,6 +33,8 @@ export default function Studio() {
   const [changeText, setChangeText] = useState("");
   const [changeRows, setChangeRows] = useState<{ loc: string; prev: number | null; cur: number | null }[]>([]);
   const [docType, setDocType] = useState("internal");
+  const [docAi, setDocAi] = useState("");
+  const [docAiState, setDocAiState] = useState<"idle" | "work" | "ok" | "down">("idle");
   const [lang, setLang] = useState("en");
   const [level, setLevel] = useState("general");
   const [pipe, setPipe] = useState<string[]>([]);
@@ -40,7 +42,10 @@ export default function Studio() {
   function go(n: number) { setStep(n); setMaxReached(m => Math.max(m, n)); }
   const fileRef = useRef<HTMLInputElement>(null);
   const live = useMemo(() => rows.filter(r => !excluded.has(r.id)), [rows, excluded]);
-  const m = useMemo(() => metrics(live), [live]);
+  const [place, setPlace] = useState("all");
+  const places = useMemo(() => [...new Set(live.map(r => r.location))].sort(), [live]);
+  const scoped = useMemo(() => (place === "all" ? live : live.filter(r => r.location === place)), [live, place]);
+  const m = useMemo(() => metrics(scoped), [scoped]);
 
   function tag(records: Record<string, string>[], source: string) {
     return records.map(r => ({ ...r, __source: source }));
@@ -60,7 +65,8 @@ export default function Studio() {
     resetAfter();
   }
   function resetAfter() {
-    setExcluded(new Set()); setBrief(null); setActions([]);
+    setPlace("all");
+    setExcluded(new Set()); setBrief(null); setActions([]); setDocAi(""); setDocAiState("idle");
     setChangeText(""); setChangeRows([]); setAiState("idle"); setNotice("");
   }
   function removeFile(name: string) {
@@ -98,7 +104,15 @@ export default function Studio() {
       throw new Error("PDF text extraction is best-effort and runs on the server. Paste the table or upload CSV/XLSX for now. Scanned PDFs cannot be read.");
     }
     if (/\.(png|jpe?g)$/.test(name)) throw new Error("Cannot read a table from an image. Paste the data or upload a data file.");
-    throw new Error("Unsupported format. Use CSV, TSV, TXT, JSON, XLSX, or paste text.");
+    try {
+      const text = await f.text();
+      const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
+      const data = (parsed.data || []) as Record<string, string>[];
+      if (!data.length || Object.keys(data[0] || {}).length < 2) throw new Error("no table found");
+      return { recs: tag(data, f.name), note: f.name };
+    } catch (e2) {
+      throw new Error("Could not read " + f.name + " as a data table. Paste the contents as text instead.");
+    }
   }
   async function onFiles(fs: FileList | File[]) {
     setImgMsg(""); setPdfNote(false); runPipe();
@@ -127,59 +141,37 @@ export default function Studio() {
       else ingest(recs, "pasted text");
     } catch (e) { setImgMsg("Could not read the pasted table."); }
   }
-  function loadSample() {
-    import("@/lib/aqi").then(mod => {
-      const parsed = Papa.parse<Record<string, string>>(mod.SAMPLE_CSV, { header: true, skipEmptyLines: true });
-      ingest(tag((parsed.data || []) as Record<string, string>[], "messy sample"), "messy sample");
-    });
-  }
-  async function loadSnapshot() {
-    try {
-      const res = await fetch("/aqi-2026-11-14-0100.csv");
-      const text = await res.text();
-      const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: true });
-      const recs = tag(((parsed.data || []) as Record<string, string>[]).map((r) => ({
-        location: r.station || r.city || "",
-        time: r.last_update || "",
-        pollutant: r.pollutant_id || "",
-        value: r.pollutant_avg || "",
-        unit: "ug/m3",
-      })), "full snapshot 14-11-2026 01:00");
-      ingest(recs, "full snapshot (570 stations)");
-      go(0);
-    } catch (e) { setImgMsg("Could not load the snapshot file."); }
-  }
   async function writeBrief() {
-    if (!live.length) return;
+    if (!scoped.length) return;
     setAiState("work"); setNotice("");
-    const scope = [...new Set(live.map(r => r.location))].sort().join(", ");
+    const scope = place === "all" ? [...new Set(scoped.map(r => r.location))].sort().join(", ") : place;
     let prev: SavedRun | null = null;
     try { prev = JSON.parse(localStorage.getItem("cas-runs") || "[]").filter((r: SavedRun) => r.scope === scope).slice(-1)[0] || null; } catch (e) { prev = null; }
     try {
-      const data = await postAnalyze({ rows: live, role, prev: prev ? { mean: prev.mean, top: prev.top } : null });
-      setBrief(data.brief); setActions(data.actions && data.actions.length ? data.actions : actionsFor(role, live));
+      const data = await postAnalyze({ rows: scoped, role, prev: prev ? { mean: prev.mean, top: prev.top } : null });
+      setBrief(data.brief); setActions(data.actions && data.actions.length ? data.actions : actionsFor(role, scoped));
       if (data.change) setChangeText(data.change);
       setAiState(data.ai ? "ok" : "down");
       if (data.notice) setNotice(data.notice);
       if (!data.ai && !data.notice) setNotice("The AI service is not available. Showing the standard template instead.");
       go(2);
     } catch (e) {
-      setBrief(heuristicBrief(live)); setActions(actionsFor(role, live));
+      setBrief(heuristicBrief(scoped)); setActions(actionsFor(role, scoped));
       setAiState("down"); setNotice("The AI service is not available. Showing the standard template instead.");
       go(2);
     }
   }
   function switchRole(r: string) {
     setRole(r);
-    if (live.length) setActions(actionsFor(r, live));
+    if (scoped.length) setActions(actionsFor(r, scoped));
     if (step >= 2) go(3);
   }
   function saveAndCompare() {
-    const scope = [...new Set(live.map(r => r.location))].sort().join(", ");
+    const scope = (place === "all" ? "all" : "place:" + place) + "|" + [...new Set(scoped.map(r => r.location))].sort().join(", ");
     let all: SavedRun[] = [];
     try { all = JSON.parse(localStorage.getItem("cas-runs") || "[]"); } catch (e) { all = []; }
     const prev = all.filter(r => r.scope === scope).slice(-1)[0] || null;
-    const cur = { id: "R" + Date.now(), time: new Date().toISOString(), scope, mean: m.mean, top: m.locMean[0] ? m.locMean[0].loc : "-", rows: live };
+    const cur = { id: "R" + Date.now(), time: new Date().toISOString(), scope, mean: m.mean, top: m.locMean[0] ? m.locMean[0].loc : "-", rows: scoped };
     if (prev) {
       const pm = new Map<string, number>();
       metrics(prev.rows).locMean.forEach(l => pm.set(l.loc, l.mean));
@@ -195,19 +187,42 @@ export default function Studio() {
       setChangeRows(m.locMean.map(l => ({ loc: l.loc, prev: null, cur: Math.round(l.mean * 10) / 10 })));
       setChangeText("This is the first brief for this area. No previous brief exists, so there is nothing to compare yet.");
     }
-    localStorage.setItem("cas-runs", JSON.stringify([...all, cur].slice(-20)));
+    try { localStorage.setItem("cas-runs", JSON.stringify([...all, cur].slice(-20))); } catch (e) { setNotice("Could not save this run in this browser (storage blocked)."); }
     go(4);
   }
-  const docText = useMemo(() => {
+  async function writeDocument() {
+    if (!brief) return;
+    setDocAiState("work");
+    try {
+      const data = await postDocument({ brief, actions, changeText, kind: docType, lang, level, role, place });
+      if (data.ai && data.text) { setDocAi(data.text); setDocAiState("ok"); }
+      else { setDocAi(""); setDocAiState("down"); }
+    } catch (e) { setDocAi(""); setDocAiState("down"); }
+  }
+  useEffect(() => {
+    if (step === 5 && brief && docAiState === "idle") writeDocument();
+  });
+  const templateText = useMemo(() => {
     if (!brief) return "";
-    return docType === "internal" ? buildInternalDoc(live, brief, actions, changeText, lang, level) : buildCitizenDoc(live, brief, actions, lang, level);
-  }, [brief, actions, docType, lang, level, live, changeText]);
+    return docType === "internal" ? buildInternalDoc(scoped, brief, actions, changeText, lang, level) : buildCitizenDoc(scoped, brief, actions, lang, level);
+  }, [brief, actions, docType, lang, level, scoped, changeText]);
+  const docText = docAi || templateText;
   function download() {
-    const blob = new Blob([docText], { type: "text/markdown" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = docType + "-" + lang + "-" + level + ".md";
-    a.click();
+    try {
+      const blob = new Blob([docText], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = docType + "-" + lang + "-" + level + ".md";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      const w = window.open("", "_blank");
+      if (w) w.document.write("<pre>" + docText.replace(/</g, "&lt;") + "</pre>");
+      else setImgMsg("Download was blocked by the browser. Copy the document text manually.");
+    }
   }
   function cites(f: { cited_row_ids: string[] }, key: string) {
     return (<span key={key}>{f.cited_row_ids.map(id => (<button key={key + id} data-testid="page:button-cite" className="chip" style={{ marginRight: 4 }} onClick={() => { setFlash(id); go(0); setTimeout(() => setFlash(""), 2500); }}>[{id}]</button>))}</span>);
@@ -234,15 +249,11 @@ export default function Studio() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="gov-card" style={{ padding: 16 }}>
               <h3 style={{ fontWeight: 700, marginBottom: 8 }}>Upload files</h3>
-              <div onClick={() => fileRef.current && fileRef.current.click()} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 24, textAlign: "center", cursor: "pointer" }}>Drop files here, or click to browse<br /><span style={{ fontSize: 12, color: "#666" }}>CSV, TSV, TXT, JSON, XLSX. Several files allowed.</span></div>
-              <input data-testid="page:input-files" ref={fileRef} type="file" multiple accept=".csv,.tsv,.txt,.json,.xlsx,.xls" style={{ display: "none" }} onChange={e => { if (e.target.files && e.target.files.length) onFiles(e.target.files); e.target.value = ""; }} />
+              <div onClick={() => fileRef.current && fileRef.current.click()} style={{ border: "1px dashed #0B5D66", borderRadius: 6, padding: 24, textAlign: "center", cursor: "pointer" }}>Drop files here, or click to browse<br /><span style={{ fontSize: 12, color: "#666" }}>Any data file: CSV, TSV, TXT, JSON, XLSX, or paste text. Several files allowed.</span></div>
+              <input data-testid="page:input-files" ref={fileRef} type="file" multiple style={{ display: "none" }} onChange={e => { if (e.target.files && e.target.files.length) onFiles(e.target.files); e.target.value = ""; }} />
               {upFiles.length > 0 && (<table data-testid="page:table-files" className="gov-table" style={{ marginTop: 12 }}><thead><tr><th>File</th><th></th></tr></thead><tbody>
                 {upFiles.map(f => (<tr key={f.name}><td className="mono">{f.name}</td><td><button data-testid="page:button-remove-file" className="btn" onClick={() => removeFile(f.name)}>Remove</button></td></tr>))}
               </tbody></table>)}
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                <button data-testid="page:button-load-sample" className="btn" onClick={loadSample}>Load messy sample</button>
-                <button data-testid="page:button-load-snapshot" className="btn" onClick={loadSnapshot}>Load full snapshot (570 stations)</button>
-              </div>
               {pdfNote && (<div style={{ marginTop: 8, background: "#FFF3CD", padding: "8px 12px", borderRadius: 4 }}>Source was a PDF. Check the extracted table below before you continue.</div>)}
             </div>
             <div className="gov-card" style={{ padding: 16 }}>
@@ -285,12 +296,20 @@ export default function Studio() {
           {notice && (<div style={{ marginTop: 8, background: "#FFF3CD", border: "1px solid #D9D6CF", borderRadius: 4, padding: "8px 12px" }}>{notice}</div>)}
         </div>)}
         {step === 2 && brief && (<div>
+          <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>Role: {ROLES.find(r => r.id === role)?.label} · Place: {place === "all" ? "All places (" + places.length + ")" : place} · {scoped.length} readings</div>
           {[{ t: "Trends", L: brief.trends }, { t: "Hotspots", L: brief.hotspots }, { t: "Data Gaps", L: brief.gaps }].map(sec => (<div key={sec.t} style={{ marginBottom: 12 }}><h3 style={{ fontWeight: 700, marginBottom: 6 }}>{sec.t}</h3>{sec.L.map((f, i) => (<div key={i} className="gov-card" style={{ padding: 10, marginBottom: 6 }}><div>{f.text}</div><div style={{ marginTop: 6 }}>{cites(f, sec.t + i)}</div></div>))}</div>))}
           <div style={{ fontSize: 12, color: "#666" }}>generated_by: {brief.generated_by}</div>
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}><button data-testid="page:button-see-actions" className="btn btn-primary" onClick={() => go(3)}>See actions</button></div>
         </div>)}
         {step === 3 && (<div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <label style={{ fontSize: 12, color: "#666" }}>Place
+              <select data-testid="page:select-place" value={place} onChange={e => { const v = e.target.value; setPlace(v); setActions(actionsFor(role, v === "all" ? live : live.filter(r => r.location === v))); }} style={{ marginLeft: 6, border: "1px solid #D9D6CF", borderRadius: 4, padding: "6px 8px" }}>
+                <option value="all">All places ({places.length})</option>
+                {places.map(pl => (<option key={pl} value={pl}>{pl}</option>))}
+              </select>
+            </label>
+            <span style={{ fontSize: 12, color: "#666" }}>Role</span>
             {ROLES.map(r => (<button key={r.id} data-testid="page:button-role" className="btn" style={role === r.id ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}} onClick={() => switchRole(r.id)}>{r.label}</button>))}
           </div>
           {actions.map((a, i) => (<div key={i} className="gov-card" style={{ padding: 10, marginBottom: 6, display: "flex", gap: 10 }}><div style={{ width: 14, borderRadius: 2, background: a.rank === 1 ? "#0B5D66" : a.rank === 2 ? "#EF6C00" : "#999" }} /><div><div>Priority {a.rank}: {a.text}</div><div style={{ marginTop: 6 }}>{cites(a, "a" + i)}</div></div></div>))}
@@ -305,13 +324,18 @@ export default function Studio() {
           <div style={{ marginTop: 8 }}><button data-testid="page:button-make-documents" className="btn btn-primary" onClick={() => go(5)}>Make documents</button></div>
         </div>)}
         {step === 5 && (<div>
+          <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>For {ROLES.find(r => r.id === role)?.label} · {place === "all" ? "All places" : place}</div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-            <div>{["internal", "citizen"].map(t => (<button key={t} data-testid="page:button-doc-type" className="btn" style={{ marginRight: 6, ...(docType === t ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setDocType(t)}>{t === "internal" ? s.internal : s.citizen}</button>))}</div>
-            <div>{["en", "hi"].map(l => (<button key={l} data-testid="page:button-doc-lang" className="btn" style={{ marginRight: 6, ...(lang === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setLang(l)}>{l === "en" ? "English" : "Hindi"}</button>))}</div>
-            <div>{["general", "child", "easy_read"].map(l => (<button key={l} data-testid="page:button-doc-level" className="btn" style={{ marginRight: 6, ...(level === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => setLevel(l)}>{l}</button>))}</div>
+            <div>{["internal", "citizen"].map(t => (<button key={t} data-testid="page:button-doc-type" className="btn" style={{ marginRight: 6, ...(docType === t ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setDocType(t); setDocAi(""); setDocAiState("idle"); }}>{t === "internal" ? s.internal : s.citizen}</button>))}</div>
+            <div>{["en", "hi"].map(l => (<button key={l} data-testid="page:button-doc-lang" className="btn" style={{ marginRight: 6, ...(lang === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setLang(l); setDocAi(""); setDocAiState("idle"); }}>{l === "en" ? "English" : "Hindi"}</button>))}</div>
+            <div>{["general", "child", "easy_read"].map(l => (<button key={l} data-testid="page:button-doc-level" className="btn" style={{ marginRight: 6, ...(level === l ? { borderColor: "#0B5D66", color: "#0B5D66" } : {}) }} onClick={() => { setLevel(l); setDocAi(""); setDocAiState("idle"); }}>{l}</button>))}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+            <span className="chip" style={docAiState === "down" ? { borderColor: "#C62828", color: "#C62828" } : {}}>{docAiState === "work" ? "AI writing..." : docAiState === "ok" ? "Written by AI" : docAiState === "down" ? "Template (AI unavailable)" : "Ready"}</span>
+            <button data-testid="page:button-regenerate-doc" className="btn" onClick={writeDocument} disabled={docAiState === "work" || !brief}>Regenerate with AI</button>
           </div>
           <div className="gov-card" style={{ padding: 24, background: "#fff" }}>
-            <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 14 }}>{docText || "Write a brief first, then the document appears here."}</pre>
+            <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 14 }}>{docAiState === "work" ? "Writing the document with AI..." : (docText || "Write a brief first, then the document appears here.")}</pre>
           </div>
           {docType === "citizen" && brief && (<div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Vulnerable-group sections are present and use the fixed template when the AI service is down.</div>)}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}><button data-testid="page:button-download-doc" className="btn btn-primary" onClick={download}>Download Markdown</button><button data-testid="page:button-print-doc" className="btn" onClick={() => window.print()}>Print / PDF</button></div>
